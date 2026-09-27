@@ -789,6 +789,17 @@ pub fn describe_config_error(raw: &str) -> String {
     if lowered.contains("reality") && lowered.contains("fingerprint") {
         return "REALITY needs a browser fingerprint (fp=), which this profile is missing".into();
     }
+    // The REALITY handshake did not authenticate, so the server relayed the
+    // connection to its decoy site and the engine saw *that* site's real
+    // certificate. Without this the user is told about a certificate they
+    // cannot do anything about, when the thing to check is the profile.
+    if lowered.contains("reality")
+        && (lowered.contains("certificate")
+            || lowered.contains("hmac")
+            || lowered.contains("fallback"))
+    {
+        return "the server did not accept this REALITY handshake, so it answered as the decoy site — the certificate the engine saw belongs to that site, not to the tunnel. Re-import the profile if its pbk or sid may have changed".into();
+    }
     if lowered.contains("invalid config json") || lowered.contains("not valid json") {
         return "the profile is not valid JSON".into();
     }
@@ -1084,14 +1095,23 @@ fn uses_vision(outbound: &serde_json::Value) -> bool {
 /// the failure mode this exists to avoid — and on an outbound with no TLS at
 /// all there is no ClientHello to shape, so nothing is written.
 fn apply_fingerprint(outbound: &mut serde_json::Value, options: &EngineOptions) {
-    if options.utls_fingerprint.is_empty() {
-        return;
-    }
+    let configured = options.utls_fingerprint.trim();
     // A share link has not been expanded into `streamSettings` yet — the
     // parser does that later — so the shape is carried in its own `fp=`
     // parameter and that is the only place a change would survive.
     if let Some(link) = outbound.get("link").and_then(|l| l.as_str()) {
-        let rewritten = set_link_fingerprint(link, &options.utls_fingerprint);
+        let effective = if !configured.is_empty() {
+            configured
+        } else if link_declares_reality(link) {
+            // A REALITY profile without a shape cannot carry its auth tag; the
+            // link parser already reads a missing `fp=` as this same default,
+            // so stamping it here changes nothing for a correct link and keeps
+            // a REALITY-without-fingerprint link from failing at compile time.
+            REALITY_DEFAULT_FINGERPRINT
+        } else {
+            return;
+        };
+        let rewritten = set_link_fingerprint(link, effective);
         outbound["link"] = serde_json::json!(rewritten);
         return;
     }
@@ -1107,16 +1127,36 @@ fn apply_fingerprint(outbound: &mut serde_json::Value, options: &EngineOptions) 
         Some("tls") => "tlsSettings",
         _ => return,
     };
+    let effective = match (configured.is_empty(), block) {
+        (false, _) => configured,
+        (true, "realitySettings") => REALITY_DEFAULT_FINGERPRINT,
+        // Plain TLS works unshaped, and a profile that never set one is not
+        // given a shape it did not ask for.
+        (true, _) => return,
+    };
     if let Some(settings) = stream
         .entry(block)
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
     {
-        settings.insert(
-            "fingerprint".into(),
-            serde_json::json!(options.utls_fingerprint),
-        );
+        settings.insert("fingerprint".into(), serde_json::json!(effective));
     }
+}
+
+/// The ClientHello shape REALITY gets when nothing else is configured.
+///
+/// The same default `zero_config`'s share-link parser applies to a REALITY
+/// link with no `fp=`, so a stored profile and a link cannot disagree about
+/// it.
+const REALITY_DEFAULT_FINGERPRINT: &str = "chrome";
+
+/// Whether a share link declares REALITY in its query.
+fn link_declares_reality(link: &str) -> bool {
+    let Some((_, rest)) = link.split_once('?') else {
+        return false;
+    };
+    let query = rest.split('#').next().unwrap_or(rest);
+    query.split('&').any(|pair| pair == "security=reality")
 }
 
 /// Stamp the evasion knobs onto one outbound.

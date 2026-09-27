@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 
 use super::*;
 use zeronet_tui::elevate::TunHandover;
+use zeronet_tui::health::{Candidate, Outcome, TunnelWatch};
 use zeronet_tui::sysproxy::Applied;
 
 /// How often housekeeping runs: flushing latency readings, checking feeds.
@@ -31,6 +32,20 @@ const PING_FLUSH_BATCH: usize = 64;
 const FEED_RETRY_GAP: Duration = Duration::from_secs(30 * 60);
 /// Upper bound on the system proxy revert at exit.
 const PROXY_REVERT_TIMEOUT: Duration = Duration::from_secs(15);
+/// A probe that has not reported back within this long is treated as lost, so
+/// a panicked task cannot wedge the watchdog into "a probe is always running".
+const PROBE_DEADLINE: Duration = Duration::from_secs(20);
+/// No input for this long means a keystroke is a return to the terminal —
+/// after a suspend, that is the moment the tunnel needs checking.
+const ACTIVE_GAP: Duration = Duration::from_secs(30);
+/// How often the client quietly looks for more servers while it is connected.
+///
+/// The finder's known-servers step reads the cached crowd rankings and tests
+/// what worked before; only when that is not enough does it fetch feeds, and
+/// the feeds answer conditional requests from the cache. The point is to keep
+/// a supply of backups for the watchdog to switch to — and, when the user
+/// shares results, to report the working servers so others can use them.
+const AUTO_FIND_INTERVAL: Duration = Duration::from_secs(45 * 60);
 
 /// A system-proxy change for the worker.
 pub(crate) enum ProxyJob {
@@ -76,6 +91,13 @@ pub(crate) enum BgEvent {
         result: Result<(), ElevationError>,
     },
     Housekeeping,
+    /// A live-connection probe finished. `resumed` tells the watchdog the
+    /// probe was the first one after the user came back, which decides how
+    /// many failures it takes to act.
+    Watchdog {
+        result: Result<Duration, String>,
+        resumed: bool,
+    },
     /// The post-connect traffic check finished.
     Health {
         /// The daemon revision it was started for; a later connection's
@@ -130,6 +152,17 @@ pub(crate) struct Background {
     sweep: Option<JoinHandle<()>>,
     pub(crate) feeds_in_flight: HashSet<i64>,
     feed_attempts: HashMap<i64, Instant>,
+    /// The tunnel watchdog: cadence, failure counts and the dead list.
+    pub(crate) health: TunnelWatch,
+    /// When the in-flight probe gives up being in flight.
+    health_deadline: Option<Instant>,
+    /// The last time a byte moved through the tunnel; `None` until it has.
+    pub(crate) last_traffic: Option<Instant>,
+    /// The last user input, and whether the user had been away before it.
+    pub(crate) input_at: Option<Instant>,
+    pub(crate) resumed: bool,
+    /// The last time a search was started, manual or automatic.
+    pub(crate) find_at: Option<Instant>,
 }
 
 impl Background {
@@ -152,6 +185,12 @@ impl Background {
             sweep: None,
             feeds_in_flight: HashSet::new(),
             feed_attempts: HashMap::new(),
+            health: TunnelWatch::new(),
+            health_deadline: None,
+            last_traffic: None,
+            input_at: None,
+            resumed: false,
+            find_at: None,
         }
     }
 
@@ -347,6 +386,10 @@ impl App<'_> {
                 }
                 true
             }
+            BgEvent::Watchdog { result, resumed } => {
+                self.on_watchdog(result, resumed).await;
+                true
+            }
             BgEvent::Proxy {
                 requested,
                 endpoints,
@@ -389,6 +432,11 @@ impl App<'_> {
             BgEvent::Housekeeping => {
                 self.flush_ping_writes();
                 self.refresh_due_subscriptions();
+                // The tunnel watchdog and the occasional background search
+                // both ride this tick: one probe or one search at a time, and
+                // neither starts while the user's traffic is moving.
+                self.maybe_probe_health();
+                self.maybe_background_find();
                 false
             }
             BgEvent::UpdateDue => {
@@ -653,6 +701,206 @@ impl App<'_> {
             }
         }
         self.dial(action, options).await
+    }
+
+    // ------------------------------------------------------ tunnel watchdog
+
+    /// Remember that the user just used the terminal.
+    ///
+    /// A keystroke after a pause is the closest thing a terminal client has
+    /// to a resume notification: it is when the tunnel is about to carry the
+    /// user's traffic again, and when a connection killed by a suspend has to
+    /// be noticed.
+    pub(crate) fn note_user_activity(&mut self) {
+        let now = Instant::now();
+        let away = self
+            .bg
+            .input_at
+            .is_none_or(|at| now.duration_since(at) >= zeronet_tui::health::AWAY_GAP);
+        self.bg.input_at = Some(now);
+        if away {
+            self.bg.resumed = true;
+        }
+    }
+
+    /// Start a probe of the live connection when one is due.
+    ///
+    /// Probes only run on a *quiet* tunnel: bytes moving are the proof the
+    /// watchdog would be looking for, and spending the user's bandwidth to
+    /// re-learn that is exactly the waste this client is meant to avoid. The
+    /// exception is a return from suspend, where the user is looking at a
+    /// stalled application and the tunnel has to be checked now.
+    pub(crate) fn maybe_probe_health(&mut self) {
+        if self.stats.status != ConnectionStatus::Connected {
+            self.bg.health_deadline = None;
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .bg
+            .health_deadline
+            .is_some_and(|deadline| now < deadline)
+        {
+            return; // a probe is already in the air
+        }
+        let resumed = std::mem::take(&mut self.bg.resumed);
+        let quiet = self
+            .bg
+            .last_traffic
+            .is_none_or(|at| now.duration_since(at) >= zeronet_tui::health::QUIET_GAP);
+        if !quiet {
+            return;
+        }
+        if !self.bg.health.probe_due(now, resumed) {
+            return;
+        }
+        self.bg.health.mark_probed(now);
+        self.bg.health_deadline = Some(now + PROBE_DEADLINE);
+        let events = self.bg.tx.clone();
+        let port = self.settings.socks_port;
+        tokio::spawn(async move {
+            let result = zeronet_tui::ping::real_delay(port).await;
+            let _ = events.send(BgEvent::Watchdog { result, resumed });
+        });
+    }
+
+    /// Act on a finished probe.
+    pub(crate) async fn on_watchdog(&mut self, result: Result<Duration, String>, resumed: bool) {
+        self.bg.health_deadline = None;
+        // The connection changed under the probe: its verdict is about a
+        // tunnel that no longer exists.
+        if self.stats.status != ConnectionStatus::Connected {
+            return;
+        }
+        match result {
+            Ok(delay) => {
+                self.bg.health.note_ok();
+                if self.bg.health.take_recovery_report() {
+                    self.toasts.success(format!(
+                        "The connection carries traffic again ({} ms).",
+                        delay.as_millis()
+                    ));
+                }
+            }
+            Err(reason) => {
+                tracing::warn!(%reason, "tunnel watchdog: probe failed");
+                if self.bg.health.note_failure(resumed) == Outcome::Recover {
+                    self.recover_connection(&reason).await;
+                }
+            }
+        }
+    }
+
+    /// Move the live connection to another profile after the probe failed.
+    ///
+    /// This is the half the client was missing: a profile that stopped
+    /// carrying traffic used to only produce a warning, so a user with five
+    /// working profiles stayed stuck on the broken one. Only the intent to be
+    /// connected is required — the dead profile may be one the user imported,
+    /// not just one the finder found.
+    pub(crate) async fn recover_connection(&mut self, reason: &str) {
+        if !self.connection.wants_connection() || self.connect_in_progress() {
+            return;
+        }
+        let now = Instant::now();
+        if self.bg.health.exhausted() {
+            // Once per episode, not once per probe: the watchdog has done all
+            // it may on its own.
+            if self.bg.health.recovery_allowed(now) {
+                self.bg.health.note_recovery(now);
+                self.toasts.warning(
+                    "The connection keeps failing. Press F to search for a working server.",
+                );
+            }
+            return;
+        }
+        if !self.bg.health.recovery_allowed(now) {
+            return;
+        }
+        let current = self.connection.dialled();
+        let candidates: Vec<Candidate> = self
+            .configs
+            .iter()
+            .map(|config| Candidate {
+                id: config.id,
+                ping_ms: config.ping_ms,
+                found: config.is_found(),
+            })
+            .collect();
+        let choice = self.bg.health.pick(&candidates, current, now);
+        self.bg.health.note_recovery(now);
+        if let Some(dead) = current {
+            self.bg.health.cool_down(dead, now);
+        }
+        match choice {
+            Some(id) => {
+                let name = self
+                    .config_by_id(id)
+                    .map(|config| config.remark.clone())
+                    .unwrap_or_default();
+                self.toasts.info(format!(
+                    "No traffic through the connection ({reason}). Switching to {name}…"
+                ));
+                self.focus_profile(id);
+                let action = self.connection.select(id);
+                if let Err(error) = self.apply_engine_action(action).await {
+                    self.toasts.error(format!("Switching failed: {error}"));
+                }
+            }
+            None => {
+                // Nothing else is known: search, and let the first find
+                // replace the dead connection.
+                self.toasts.info(
+                    "No traffic through the connection, and no other server is known here. Searching…",
+                );
+                if !self.finder.running() {
+                    self.start_finder(false);
+                    self.finder.require_replacement();
+                }
+            }
+        }
+    }
+
+    /// Look for more servers while connected, occasionally and quietly.
+    ///
+    /// The supply of backups the watchdog can switch to is what keeps a
+    /// connection recoverable, and the crowd report a search sends is what
+    /// makes the working servers visible to everyone else. It runs only in a
+    /// quiet moment — a search probes hundreds of endpoints and downloads
+    /// feeds, and it must not compete with the user's traffic.
+    pub(crate) fn maybe_background_find(&mut self) {
+        if self.stats.status != ConnectionStatus::Connected || !self.connection.wants_connection() {
+            return;
+        }
+        if self.finder.running() {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .bg
+            .find_at
+            .is_some_and(|at| now.duration_since(at) < AUTO_FIND_INTERVAL)
+        {
+            return;
+        }
+        if self
+            .bg
+            .input_at
+            .is_some_and(|at| now.duration_since(at) < ACTIVE_GAP)
+        {
+            return;
+        }
+        if self
+            .bg
+            .last_traffic
+            .is_some_and(|at| now.duration_since(at) < zeronet_tui::health::QUIET_GAP)
+        {
+            return;
+        }
+        self.bg.find_at = Some(now);
+        // A background search adds backups; it never dials and never replaces
+        // the live connection.
+        self.start_finder(false);
     }
 
     /// Check, off the frame loop, that the live connection carries traffic.

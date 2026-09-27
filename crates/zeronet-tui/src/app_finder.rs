@@ -71,6 +71,18 @@ impl FinderState {
     pub(crate) fn running(&self) -> bool {
         self.session.is_some()
     }
+
+    /// Ask the search to replace the live connection with the first server it
+    /// finds.
+    ///
+    /// Used when the tunnel stopped carrying traffic and the watchdog has no
+    /// other profile to move to, so a fresh find is the only way out.
+    pub(crate) fn require_replacement(&mut self) {
+        if let Some(session) = &mut self.session {
+            session.connect = true;
+            session.replace = true;
+        }
+    }
 }
 
 impl App<'_> {
@@ -86,14 +98,18 @@ impl App<'_> {
             // Asking again while a search runs only upgrades it to connect.
             if connect && !session.connect {
                 session.connect = true;
-                self.toasts.info("Still searching. Will connect to the first server that works.");
+                self.toasts
+                    .info("Still searching. Will connect to the first server that works.");
             } else {
                 self.toasts.info("Already searching for servers…");
             }
             return;
         }
         let request = FinderRequest {
-            history: self.db.found_history(finder::HISTORY_LINKS).unwrap_or_default(),
+            history: self
+                .db
+                .found_history(finder::HISTORY_LINKS)
+                .unwrap_or_default(),
             sources: zero_discovery::sources::enabled(&[], self.settings.finder_max_tier),
             cache_dir: self.finder_cache_dir(),
             want_alive: WANT_ALIVE,
@@ -109,6 +125,9 @@ impl App<'_> {
         let tx = self.finder.tx.clone();
         tokio::spawn(finder::run(request, tx, cancel.clone()));
         let connect = connect && !self.connection.wants_connection();
+        // Remembered so the occasional background search does not fire right
+        // after a manual one.
+        self.bg.find_at = Some(Instant::now());
         self.finder.session = Some(FinderSession {
             cancel,
             connect,
@@ -150,7 +169,11 @@ impl App<'_> {
                 let _ = self.db.record_found_failure(&key);
             }
             FinderEvent::Note(note) => tracing::info!(%note, "finder"),
-            FinderEvent::Alive { info, delay_ms, origin } => {
+            FinderEvent::Alive {
+                info,
+                delay_ms,
+                origin,
+            } => {
                 self.finder.tally.ok(&info.key, delay_ms);
                 let Some(id) = self.store_found(&info, delay_ms, origin) else {
                     return true;
@@ -171,7 +194,8 @@ impl App<'_> {
                         session.connect = false;
                         session.replace = false;
                     }
-                    self.toasts.success(format!("Found {} · {delay_ms} ms. Connecting…", info.name));
+                    self.toasts
+                        .success(format!("Found {} · {delay_ms} ms. Connecting…", info.name));
                     // Already online: switch the running engine over.
                     let action = if online {
                         self.connection.select(id)
@@ -183,12 +207,15 @@ impl App<'_> {
                         self.toasts.error(format!("Connecting failed: {error}"));
                     }
                 } else {
-                    self.toasts.info(format!("Found {} · {delay_ms} ms", info.name));
+                    self.toasts
+                        .info(format!("Found {} · {delay_ms} ms", info.name));
                 }
             }
             FinderEvent::Done { alive, reason } => {
                 let session = self.finder.session.take();
-                let seconds = session.as_ref().map_or(0, |s| s.started.elapsed().as_secs());
+                let seconds = session
+                    .as_ref()
+                    .map_or(0, |s| s.started.elapsed().as_secs());
                 let _ = self.db.prune_found(self.settings.finder_keep);
                 self.reload_configs();
                 if alive == 0 && reason != "cancelled" {
@@ -214,7 +241,12 @@ impl App<'_> {
 
     /// Build a runnable profile from a found link and store it. Returns the
     /// profile id, or `None` when the link cannot run here.
-    fn store_found(&mut self, info: &zero_discovery::LinkInfo, delay_ms: u32, origin: Origin) -> Option<i64> {
+    fn store_found(
+        &mut self,
+        info: &zero_discovery::LinkInfo,
+        delay_ms: u32,
+        origin: Origin,
+    ) -> Option<i64> {
         let link = zero_config::parse_link(&info.link).ok()?;
         let (json, remark, protocol, address, port) = match self.profile_from_link(&link) {
             Ok(profile) => profile,
@@ -246,7 +278,9 @@ impl App<'_> {
         match result {
             Ok(delay) => {
                 self.finder.switches = 0;
-                self.finder.tally.ok(&key, delay.as_millis().min(u128::from(u32::MAX)) as u32);
+                self.finder
+                    .tally
+                    .ok(&key, delay.as_millis().min(u128::from(u32::MAX)) as u32);
             }
             Err(_) => {
                 self.finder.tally.failed(&key);
@@ -256,18 +290,25 @@ impl App<'_> {
                     return;
                 }
                 self.finder.switches += 1;
-                let next = self
-                    .db
-                    .found_ranked()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|candidate| {
-                        *candidate != id && self.config_by_id(*candidate).is_some_and(|c| c.ping_ms.is_some())
-                    });
+                let next =
+                    self.db
+                        .found_ranked()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|candidate| {
+                            *candidate != id
+                                && self
+                                    .config_by_id(*candidate)
+                                    .is_some_and(|c| c.ping_ms.is_some())
+                        });
                 match next {
                     Some(next) if self.finder.switches <= MAX_SWITCHES => {
-                        let name = self.config_by_id(next).map(|c| c.remark.clone()).unwrap_or_default();
-                        self.toasts.info(format!("Trying another found server: {name}"));
+                        let name = self
+                            .config_by_id(next)
+                            .map(|c| c.remark.clone())
+                            .unwrap_or_default();
+                        self.toasts
+                            .info(format!("Trying another found server: {name}"));
                         let action = self.connection.connect_to(next);
                         self.focus_profile(next);
                         if let Err(error) = self.apply_engine_action(action).await {
@@ -308,7 +349,10 @@ impl App<'_> {
         // In TUN mode this process's own sockets leave through the tunnel,
         // where the relay would see the VPN server instead of this network.
         let through_tunnel = self.stats.tun_active
-            && matches!(self.stats.status, ConnectionStatus::Connected | ConnectionStatus::Reconnecting);
+            && matches!(
+                self.stats.status,
+                ConnectionStatus::Connected | ConnectionStatus::Reconnecting
+            );
         let nonce = self.daily_nonce();
         let cache = self.finder_cache_dir();
         let events = self.bg.tx.clone();
@@ -320,7 +364,11 @@ impl App<'_> {
     }
 
     /// The relay answered (or did not).
-    pub(crate) fn on_crowd_reported(&mut self, count: usize, result: Result<Option<String>, String>) {
+    pub(crate) fn on_crowd_reported(
+        &mut self,
+        count: usize,
+        result: Result<Option<String>, String>,
+    ) {
         self.finder.reporting = false;
         match result {
             Ok(net) => {

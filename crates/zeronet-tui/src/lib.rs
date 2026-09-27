@@ -9,6 +9,7 @@ pub mod dragselect;
 pub mod effects;
 pub mod elevate;
 pub mod finder;
+pub mod health;
 pub mod imageview;
 pub mod interaction;
 pub mod keymap;

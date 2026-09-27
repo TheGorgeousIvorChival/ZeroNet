@@ -1398,6 +1398,14 @@ impl<'a> App<'a> {
     fn on_status_change(&mut self, next: DaemonStats) {
         let previous_status = self.stats.status;
         let new_revision = next.revision > self.reported_revision;
+        // Bytes moved: the watchdog does not need to probe a tunnel that is
+        // visibly carrying traffic, and the occasional background search
+        // waits for a quiet moment.
+        if next.upload_bytes != self.stats.upload_bytes
+            || next.download_bytes != self.stats.download_bytes
+        {
+            self.bg.last_traffic = Some(Instant::now());
+        }
         self.stats = next;
 
         // The session clock runs through a reconnect, like any VPN client's:
@@ -1554,6 +1562,12 @@ impl<'a> App<'a> {
     }
 
     async fn handle_event_inner(&mut self, event: Event) -> Result<()> {
+        // Any input is the user being present — and the only "resume" signal a
+        // terminal client has. A keystroke after a pause is when a tunnel
+        // killed by a suspend has to be noticed.
+        if matches!(event, Event::Key(_) | Event::Mouse(_) | Event::Paste(_)) {
+            self.note_user_activity();
+        }
         match event {
             Event::Mouse(mouse) => {
                 self.interaction
@@ -4041,7 +4055,10 @@ impl App<'_> {
 
     /// The runnable profile for a share link: its JSON config, name,
     /// protocol and endpoint. Fails with the reason when it would not run.
-    fn profile_from_link(&self, link: &zero_config::ShareLink) -> Result<(String, String, String, String, u16)> {
+    fn profile_from_link(
+        &self,
+        link: &zero_config::ShareLink,
+    ) -> Result<(String, String, String, String, u16)> {
         let proto_name = link.outbound.protocol.name().to_string();
         let preset = zero_config::IranPreset {
             outbounds: zero_config::presets::outbounds_from_links([link.link.as_str()]),

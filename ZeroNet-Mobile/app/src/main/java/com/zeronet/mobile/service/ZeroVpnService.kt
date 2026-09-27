@@ -4,8 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
@@ -16,6 +18,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.zeronet.mobile.BuildConfig
 import com.zeronet.mobile.R
 import com.zeronet.mobile.core.SocketProtection
@@ -38,12 +41,14 @@ class ZeroVpnService : VpnService(), TunnelHost {
 
     private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var unlockReceiver: BroadcastReceiver? = null
     private var lastState: ConnState = ConnState.Idle
 
     override fun onCreate() {
         super.onCreate()
         SocketProtection.install { fd -> protect(fd) }
         ensureChannel()
+        registerUnlockReceiver()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -77,6 +82,7 @@ class ZeroVpnService : VpnService(), TunnelHost {
 
     override fun onDestroy() {
         unregisterNetworkCallback()
+        unregisterUnlockReceiver()
         SocketProtection.install(null)
         super.onDestroy()
     }
@@ -181,6 +187,35 @@ class ZeroVpnService : VpnService(), TunnelHost {
     private fun unregisterNetworkCallback() {
         networkCallback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
         networkCallback = null
+    }
+
+    /**
+     * Unlock is when a tunnel that died while the phone was locked gets
+     * noticed: the engine checks whether the tunnel still carries traffic and
+     * recovers it if not (Engine.onUnlocked). The broadcast costs nothing
+     * while the tunnel is healthy — the check itself is one small request.
+     */
+    private fun registerUnlockReceiver() {
+        if (unlockReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                Engine.onUnlocked()
+            }
+        }
+        runCatching {
+            ContextCompat.registerReceiver(
+                this,
+                receiver,
+                IntentFilter(Intent.ACTION_USER_PRESENT),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+        }.onSuccess { unlockReceiver = receiver }
+            .onFailure { Log.w(TAG, "unlock receiver", it) }
+    }
+
+    private fun unregisterUnlockReceiver() {
+        unlockReceiver?.let { runCatching { unregisterReceiver(it) } }
+        unlockReceiver = null
     }
 
     // ------------------------------------------------------------ notification

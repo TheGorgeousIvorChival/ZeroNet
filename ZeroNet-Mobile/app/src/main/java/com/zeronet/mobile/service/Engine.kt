@@ -185,6 +185,10 @@ object Engine {
     private const val CROWD_FETCH_MS = 3_000
     /** Not Cloudflare: Worker-served configs (BPB and the like) cannot reach Cloudflare addresses. */
     private const val PROBE_URL = "http://www.gstatic.com/generate_204"
+    /** How often the connected client quietly looks for more servers (see [maybeBackgroundFind]). */
+    private const val BACKGROUND_FIND_MS = 45 * 60_000L
+    /** No user traffic for this long before a background search may start. */
+    private const val BACKGROUND_FIND_QUIET_MS = 30_000L
 
     // ---- speed-based switching -------------------------------------------------
     /** Seconds of real traffic the slow decision looks at. */
@@ -227,11 +231,19 @@ object Engine {
     private var profileJob: Job? = null
     private var scanJob: Job? = null
     private var monitorJob: Job? = null
+    /** One replacement search at a time, from the switch path or the periodic one. */
+    private var replacementJob: Job? = null
     /** Health checks in a row in which the chosen config failed; see [CHOSEN_DOWN_AFTER]. */
     private var chosenFailures = 0
     private val healthNow = Channel<Unit>(Channel.CONFLATED)
     /** Wakes the kill-switch retry loop early (a network change). */
     private val retryNow = Channel<Unit>(Channel.CONFLATED)
+    /** Last byte through the tunnel; the periodic background search waits for a quiet moment. */
+    @Volatile private var lastTrafficAt = 0L
+    /** Last time the background search ran; a connect resets the clock. */
+    @Volatile private var lastBackgroundFindAt = 0L
+    /** The unlock recovery is one-shot per unlock; this keeps two from stacking. */
+    @Volatile private var unlockRecovery = false
 
     /**
      * The kill switch's placeholder interface: an established VPN interface
@@ -592,6 +604,7 @@ object Engine {
                 }
             }
             reportCrowd(network)
+            lastBackgroundFindAt = System.currentTimeMillis()
             monitorJob = scope.launch { monitor(network) }
         } catch (e: BringUpFailed) {
             // bringUp() already published the failure.
@@ -969,11 +982,13 @@ object Engine {
                 val next = TrafficStats(upRate, downRate, up, down, downHistory.toList(), upHistory.toList())
                 stats.value = next
                 if (interactive && tick % 2 == 0L) host?.onStats(next)
+                if (upRate + downRate > 0) lastTrafficAt = System.currentTimeMillis()
                 maybeSwitchOnSpeed(downRate, upRate, sessions, downHistory)
             }
             if (forced || (settings.autoSwitch && tick * 1000 % HEALTH_INTERVAL_MS == 0L)) {
                 healthCheck(NetworkIdentity.current(app) ?: network)
             }
+            maybeBackgroundFind(NetworkIdentity.current(app) ?: network)
         }
     }
 
@@ -1063,7 +1078,7 @@ object Engine {
         reloadPool()
         // Refill the pool in the background so the next switch has somewhere to go.
         val network = NetworkIdentity.current(app) ?: return@withLock
-        scope.launch { runCatching { findReplacements(network, excludeKeys = pool.map { it.server.key }.toSet()) } }
+        launchReplacementSearch(network, excludeKeys = pool.map { it.server.key }.toSet())
     }
 
     private suspend fun healthCheck(network: String? = NetworkIdentity.current(app)) = mutex.withLock {
@@ -1138,6 +1153,105 @@ object Engine {
             pool.take(linksInConfig(settings.profile)).map { it.server.key } !=
                 before.take(linksInConfig(settings.profile)) -> reloadPool()
             else -> publishConnected()
+        }
+    }
+
+    // -------------------------------------------------------------- failsafes
+
+    /**
+     * The screen was unlocked after a locked stretch: the moment the user is
+     * about to use the phone, and the moment a tunnel that quietly died in
+     * doze has to be noticed. While locked, a NAT rebind or a silent
+     * Wi-Fi ↔ cellular move can leave the tunnel up but carrying nothing, and
+     * the monitor's cadence is suspended in doze with everything else.
+     *
+     * The check is one 204 request through the local proxy, so a working
+     * tunnel costs nothing. Only when traffic does not move: rebind the
+     * pooled QUIC and WireGuard connections onto the current network, check
+     * the servers (the health check replaces the dead ones or searches), and
+     * restart the core when the servers answer but the tunnel still will not
+     * carry traffic.
+     */
+    fun onUnlocked() {
+        if (!running || unlockRecovery) return
+        unlockRecovery = true
+        scope.launch {
+            try {
+                if (tunnelCarriesTraffic()) return@launch
+                EngineLog.i("screen unlocked: the tunnel is not carrying traffic — recovering")
+                homeCountry = detectHomeCountry()
+                runCatching { ZrayNative.networkChanged() }
+                // The rebind may have been the whole problem (the pooled
+                // connections moved networks while the phone was locked).
+                if (tunnelCarriesTraffic()) return@launch
+                healthCheck(NetworkIdentity.current(app))
+                if (!running) return@launch
+                if (tunnelCarriesTraffic()) return@launch
+                if (target is ConnectTarget.Specific) {
+                    // The chosen config is dead and the health check never
+                    // swaps it: reconnecting to it is the honest retry.
+                    reconnect()
+                } else {
+                    EngineLog.i("screen unlocked: servers answer but the tunnel stays dead — restarting the core")
+                    mutex.withLock { restartCore() }
+                }
+            } finally {
+                unlockRecovery = false
+            }
+        }
+    }
+
+    /** One small request through the local proxy: does the tunnel carry traffic right now. */
+    private suspend fun tunnelCarriesTraffic(): Boolean = withContext(Dispatchers.IO) {
+        runCatching { Diagnostics.tunnel(settings.httpPort).status == CheckStatus.Ok }.getOrDefault(false)
+    }
+
+    /**
+     * Every so often, while connected and the user's traffic is quiet, test a
+     * fresh batch of public servers and — when the user shares results —
+     * report the working ones. The finds go into the pool as standby backups
+     * for the health check, and the reports are what keep the crowd's picture
+     * of this network current for everyone else.
+     *
+     * Bounded like the connect-time background search (a couple of servers,
+     * 20 s once the tunnel is up), so the cost is one conditional feed
+     * download and a few hundred small probes, once every [BACKGROUND_FIND_MS].
+     * Skipped in Gaming (its contract is that the server never changes
+     * mid-match) and for a specific chosen config (the user picked one server;
+     * the feeds have nothing to add to it).
+     */
+    private fun maybeBackgroundFind(network: String?) {
+        if (network == null) return
+        if (settings.profile == ConnectionProfile.Gaming || target !is ConnectTarget.Fastest) return
+        if (backgroundFindGuarded()) return
+        val now = System.currentTimeMillis()
+        if (now - lastBackgroundFindAt < BACKGROUND_FIND_MS) return
+        if (now - lastTrafficAt < BACKGROUND_FIND_QUIET_MS) return
+        lastBackgroundFindAt = now
+        EngineLog.i("quiet tunnel: looking for more servers in the background")
+        launchReplacementSearch(network, excludeKeys = pool.map { it.server.key }.toSet())
+    }
+
+    /** `true` while a replacement search or a user-triggered job owns the search slot. */
+    private fun backgroundFindGuarded() =
+        replacementJob?.isActive == true || refreshJob?.isActive == true || testJob?.isActive == true
+
+    /**
+     * Run one replacement search and report its results, one at a time. Used
+     * after a switch (the next switch needs somewhere to go) and by the
+     * periodic quiet search; both feed the same crowd report.
+     */
+    private fun launchReplacementSearch(network: String, excludeKeys: Set<String>) {
+        if (replacementJob?.isActive == true) return
+        replacementJob = scope.launch {
+            try {
+                findReplacements(network, excludeKeys)
+                reportCrowd(network)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                EngineLog.w("replacement search: ${e.message.orEmpty()}")
+            }
         }
     }
 
