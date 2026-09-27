@@ -748,7 +748,10 @@ impl Database {
                 "auto_update_check",
                 if settings.auto_update_check { "1" } else { "0" },
             ),
-            ("share_results", if settings.share_results { "1" } else { "0" }),
+            (
+                "share_results",
+                if settings.share_results { "1" } else { "0" },
+            ),
             ("finder_max_tier", &settings.finder_max_tier.to_string()),
             ("finder_keep", &settings.finder_keep.to_string()),
         ];
@@ -1145,8 +1148,12 @@ impl Database {
     /// the daily report nonce).
     pub fn get_value(&self, key: &str) -> Option<String> {
         let conn = self.lock();
-        conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| row.get(0))
-            .ok()
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .ok()
     }
 
     pub fn set_value(&self, key: &str, value: &str) -> SqlResult<()> {
@@ -1542,9 +1549,15 @@ mod tests {
     #[test]
     fn a_server_found_twice_is_one_profile_and_user_profiles_are_never_relabelled() {
         let db = Database::open_temporary("found").unwrap();
-        let mine = db.insert_config("Mine", "vless", "1.2.3.4", 443, "{}", None).unwrap();
-        let a = db.upsert_found(&found("aaaa", "vless://a", "found", 120.0)).unwrap();
-        let again = db.upsert_found(&found("aaaa", "vless://a", "crowd", 90.0)).unwrap();
+        let mine = db
+            .insert_config("Mine", "vless", "1.2.3.4", 443, "{}", None)
+            .unwrap();
+        let a = db
+            .upsert_found(&found("aaaa", "vless://a", "found", 120.0))
+            .unwrap();
+        let again = db
+            .upsert_found(&found("aaaa", "vless://a", "crowd", 90.0))
+            .unwrap();
         assert_eq!(a, again);
         assert_ne!(a, mine);
         let configs = db.get_configs().unwrap();
@@ -1557,26 +1570,39 @@ mod tests {
         assert_eq!(db.found_link_key(mine), None);
 
         // A failure clears the delay; history lists only servers that worked.
-        db.upsert_found(&found("bbbb", "vless://b", "crowd", 300.0)).unwrap();
+        db.upsert_found(&found("bbbb", "vless://b", "crowd", 300.0))
+            .unwrap();
         db.record_found_failure("aaaa").unwrap();
         let history = db.found_history(10).unwrap();
         assert_eq!(history.len(), 2);
-        assert_eq!(db.found_ranked().unwrap().first().copied(), db.get_configs().unwrap().iter().find(|c| c.remark == "Found" && c.ping_ms == Some(300.0)).map(|c| c.id));
+        assert_eq!(
+            db.found_ranked().unwrap().first().copied(),
+            db.get_configs()
+                .unwrap()
+                .iter()
+                .find(|c| c.remark == "Found" && c.ping_ms == Some(300.0))
+                .map(|c| c.id)
+        );
     }
 
     #[test]
     fn pruning_keeps_the_active_and_the_most_useful_found_servers_and_every_user_profile() {
         let db = Database::open_temporary("prune").unwrap();
-        db.insert_config("Mine", "vless", "1.2.3.4", 443, "{}", None).unwrap();
+        db.insert_config("Mine", "vless", "1.2.3.4", 443, "{}", None)
+            .unwrap();
         let mut ids = Vec::new();
         for i in 0..6 {
             let key = format!("k{i}");
             let link = format!("vless://{i}");
-            ids.push(db.upsert_found(&found(&key, &link, "found", 100.0)).unwrap());
+            ids.push(
+                db.upsert_found(&found(&key, &link, "found", 100.0))
+                    .unwrap(),
+            );
         }
         // k5 is the most useful; k0 is the one in use.
         for _ in 0..3 {
-            db.upsert_found(&found("k5", "vless://5", "found", 100.0)).unwrap();
+            db.upsert_found(&found("k5", "vless://5", "found", 100.0))
+                .unwrap();
         }
         db.set_active_config(ids[0]).unwrap();
         for i in 0..5 {
@@ -1586,7 +1612,10 @@ mod tests {
         assert_eq!(removed, 4);
         let left: Vec<_> = db.get_configs().unwrap();
         assert!(left.iter().any(|c| c.remark == "Mine"));
-        assert!(left.iter().any(|c| c.id == ids[0]), "the active profile stays");
+        assert!(
+            left.iter().any(|c| c.id == ids[0]),
+            "the active profile stays"
+        );
         assert!(left.iter().any(|c| c.id == ids[5]), "the most useful stays");
         assert_eq!(left.len(), 3);
     }

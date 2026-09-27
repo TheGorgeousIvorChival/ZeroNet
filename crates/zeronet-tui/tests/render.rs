@@ -199,7 +199,7 @@ impl Harness {
                     session: None,
                     speed_history: (&[], &[]),
                     update_status: &zeronet_tui::update::Status::Idle,
-            finder_status: self.finder_status.clone(),
+                    finder_status: self.finder_status.clone(),
                 };
                 renderer.render(frame);
             })
@@ -229,7 +229,11 @@ fn config(id: i64, remark: &str, address: &str, port: u16, ping: Option<f64>) ->
         subscription_id: None,
         ping_ms: ping,
         last_used: None,
-        origin: if id == 3 { "found".into() } else { "user".into() },
+        origin: if id == 3 {
+            "found".into()
+        } else {
+            "user".into()
+        },
     }
 }
 
@@ -1577,7 +1581,7 @@ fn the_opening_slit_is_painted_as_a_lit_bar() {
                 session: None,
                 speed_history: (&[], &[]),
                 update_status: &zeronet_tui::update::Status::Idle,
-            finder_status: None,
+                finder_status: None,
             };
             renderer.render(frame);
         })
@@ -1686,7 +1690,10 @@ fn the_footer_no_longer_carries_qr_or_find() {
         !footer.contains("^F"),
         "footer still advertises the filter: {footer:?}"
     );
-    assert!(footer.contains("Find server"), "no finder button: {footer:?}");
+    assert!(
+        footer.contains("Find server"),
+        "no finder button: {footer:?}"
+    );
     assert!(footer.contains("Connect"));
     assert!(footer.contains("Help"));
 }
@@ -1695,14 +1702,18 @@ fn the_footer_no_longer_carries_qr_or_find() {
 fn the_finder_button_is_clickable_and_its_progress_shows_in_the_header() {
     let mut h = Harness::new();
     let frame = h.draw(130, 44);
-    let clickable = (0..130).any(|x| h.interaction.hit_test(x, 43) == Some(ComponentId::FooterFindServers));
+    let clickable =
+        (0..130).any(|x| h.interaction.hit_test(x, 43) == Some(ComponentId::FooterFindServers));
     assert!(clickable, "the footer's Find server is not clickable");
     assert!(!frame.contains("Finding servers"));
 
     h.finder_status = Some("Finding servers · 1 working · testing servers · 12 s · 1840 candidates · 96 reachable · 64 tested".into());
     let frame = h.draw(130, 44);
     dump("finder_progress", &frame);
-    assert!(frame.contains("Finding servers · 1 working"), "no finder progress in the header");
+    assert!(
+        frame.contains("Finding servers · 1 working"),
+        "no finder progress in the header"
+    );
 }
 
 #[test]
@@ -1710,7 +1721,11 @@ fn found_profiles_are_marked_apart_from_the_users_own() {
     let mut h = Harness::new();
     let frame = h.draw(130, 44);
     // Fixture profile 3 is a found one; the rest are the user's own.
-    assert_eq!(frame.matches("◇ ").count(), 1, "exactly one found marker:\n{frame}");
+    assert_eq!(
+        frame.matches("◇ ").count(),
+        1,
+        "exactly one found marker:\n{frame}"
+    );
 }
 
 #[test]
@@ -2484,7 +2499,7 @@ fn a_live_session_shows_its_protocol_clock_and_speed_graphs() {
                 session: Some(std::time::Duration::from_secs(3 * 3600 + 7 * 60 + 5)),
                 speed_history: (&up, &down),
                 update_status: &zeronet_tui::update::Status::Idle,
-            finder_status: None,
+                finder_status: None,
             };
             renderer.render(frame);
         })

@@ -23,14 +23,27 @@ async fn the_finder_finds_a_working_server_on_this_network() {
         ..FinderRequest::default()
     };
     let started = Instant::now();
-    let job = tokio::spawn(finder::run(request, tx, zero_discovery::CancellationToken::new()));
+    let job = tokio::spawn(finder::run(
+        request,
+        tx,
+        zero_discovery::CancellationToken::new(),
+    ));
     let mut alive = Vec::new();
     let mut failed = 0;
     let mut done = None;
-    while let Some(event) = tokio::time::timeout(Duration::from_secs(200), rx.recv()).await.unwrap() {
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(200), rx.recv())
+        .await
+        .unwrap()
+    {
         match event {
-            FinderEvent::Stage(stage) => println!("[{:>5.1}s] stage {stage}", started.elapsed().as_secs_f32()),
-            FinderEvent::Alive { info, delay_ms, origin } => {
+            FinderEvent::Stage(stage) => {
+                println!("[{:>5.1}s] stage {stage}", started.elapsed().as_secs_f32())
+            }
+            FinderEvent::Alive {
+                info,
+                delay_ms,
+                origin,
+            } => {
                 println!(
                     "[{:>5.1}s] ALIVE {origin:?} {} {}/{}/{} {delay_ms} ms",
                     started.elapsed().as_secs_f32(),
@@ -45,7 +58,10 @@ async fn the_finder_finds_a_working_server_on_this_network() {
             FinderEvent::Note(note) => println!("note: {note}"),
             FinderEvent::Progress(p) => println!("  progress {p:?}"),
             FinderEvent::Done { alive, reason } => {
-                println!("[{:>5.1}s] done: {alive} alive ({reason}), {failed} known failed", started.elapsed().as_secs_f32());
+                println!(
+                    "[{:>5.1}s] done: {alive} alive ({reason}), {failed} known failed",
+                    started.elapsed().as_secs_f32()
+                );
                 done = Some(alive);
                 break;
             }

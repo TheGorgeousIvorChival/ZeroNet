@@ -763,24 +763,28 @@ pub extern "system" fn Java_com_zeronet_mobile_core_ZrayNative_verifySignature<'
     body: JString<'local>,
     signature: JString<'local>,
 ) -> jboolean {
-    contained("verifySignature", || JNI_FALSE, || {
-        let ok = (|| -> Option<bool> {
-            let key = read_string(&mut env, &public_key_hex).ok()?;
-            let body = read_string(&mut env, &body).ok()?;
-            let signature = read_string(&mut env, &signature).ok()?;
-            Some(zero_discovery::sign::verify_with(
-                &key,
-                body.as_bytes(),
-                &signature,
-            ))
-        })()
-        .unwrap_or(false);
-        if ok {
-            JNI_TRUE
-        } else {
-            JNI_FALSE
-        }
-    })
+    contained(
+        "verifySignature",
+        || JNI_FALSE,
+        || {
+            let ok = (|| -> Option<bool> {
+                let key = read_string(&mut env, &public_key_hex).ok()?;
+                let body = read_string(&mut env, &body).ok()?;
+                let signature = read_string(&mut env, &signature).ok()?;
+                Some(zero_discovery::sign::verify_with(
+                    &key,
+                    body.as_bytes(),
+                    &signature,
+                ))
+            })()
+            .unwrap_or(false);
+            if ok {
+                JNI_TRUE
+            } else {
+                JNI_FALSE
+            }
+        },
+    )
 }
 
 /// `builtInPublicKey(): String` — the crowd-data signing key compiled into

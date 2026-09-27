@@ -65,11 +65,16 @@ pub enum FinderEvent {
         origin: Origin,
     },
     /// A known server that did not answer (successes come as [`FinderEvent::Alive`]).
-    Failed { key: String },
+    Failed {
+        key: String,
+    },
     /// Something the user may want to know (a feed that failed, …).
     Note(String),
     /// The search is over.
-    Done { alive: usize, reason: String },
+    Done {
+        alive: usize,
+        reason: String,
+    },
 }
 
 /// Counters of the running search.
@@ -129,7 +134,10 @@ pub async fn run(request: FinderRequest, tx: Tx, cancel: CancellationToken) {
         .map(|link| (link.clone(), Origin::Found))
         .collect();
     if request.use_crowd {
-        let cache = request.cache_dir.as_ref().map(|dir| dir.join("rankings.json"));
+        let cache = request
+            .cache_dir
+            .as_ref()
+            .map(|dir| dir.join("rankings.json"));
         let rankings = tokio::select! {
             _ = cancel.cancelled() => None,
             r = crowd_client::fetch_rankings(cache.as_deref(), Duration::from_secs(4)) => r,
@@ -162,19 +170,27 @@ pub async fn run(request: FinderRequest, tx: Tx, cancel: CancellationToken) {
             links,
             ..TestRequest::default()
         };
-        let events = collect(|sink, cancel| zero_discovery::test_links(test, sink, cancel), &cancel).await;
+        let events = collect(
+            |sink, cancel| zero_discovery::test_links(test, sink, cancel),
+            &cancel,
+        )
+        .await;
         for event in events {
             if event["t"] != "result" {
                 continue;
             }
             let key = event["key"].as_str().unwrap_or_default().to_string();
-            let Some((link, origin)) = origins.get(&key) else { continue };
+            let Some((link, origin)) = origins.get(&key) else {
+                continue;
+            };
             let delay = event["delay_ms"].as_i64().unwrap_or(-1);
             if delay < 0 {
                 let _ = tx.send(FinderEvent::Failed { key });
                 continue;
             }
-            let Ok(candidate) = zero_discovery::link::parse_candidate(link) else { continue };
+            let Ok(candidate) = zero_discovery::link::parse_candidate(link) else {
+                continue;
+            };
             alive += 1;
             let _ = tx.send(FinderEvent::Alive {
                 info: candidate.info,
@@ -184,11 +200,17 @@ pub async fn run(request: FinderRequest, tx: Tx, cancel: CancellationToken) {
         }
     }
     if cancel.is_cancelled() {
-        let _ = tx.send(FinderEvent::Done { alive, reason: "cancelled".into() });
+        let _ = tx.send(FinderEvent::Done {
+            alive,
+            reason: "cancelled".into(),
+        });
         return;
     }
     if alive >= want {
-        let _ = tx.send(FinderEvent::Done { alive, reason: "enough".into() });
+        let _ = tx.send(FinderEvent::Done {
+            alive,
+            reason: "enough".into(),
+        });
         return;
     }
 
@@ -213,42 +235,49 @@ pub async fn run(request: FinderRequest, tx: Tx, cancel: CancellationToken) {
         let tx = tx.clone();
         let found = Arc::new(Mutex::new(0usize));
         let counter = Arc::clone(&found);
-        let callback = move |event: Value| {
-            match event["t"].as_str() {
-                Some("stage") => {
-                    let _ = tx.send(FinderEvent::Stage(event["stage"].as_str().unwrap_or_default().into()));
-                }
-                Some("progress") => {
-                    let n = |k: &str| event[k].as_u64().unwrap_or(0) as usize;
-                    let _ = tx.send(FinderEvent::Progress(Progress {
-                        candidates: n("candidates"),
-                        tcp_done: n("tcp_done"),
-                        tcp_open: n("tcp_open"),
-                        real_done: n("real_done"),
-                        alive: n("alive"),
-                    }));
-                }
-                Some("alive") => {
-                    if let Ok(info) = serde_json::from_value::<LinkInfoWire>(event["info"].clone()) {
-                        *counter.lock().unwrap_or_else(|p| p.into_inner()) += 1;
-                        let _ = tx.send(FinderEvent::Alive {
-                            info: info.into(),
-                            delay_ms: event["delay_ms"].as_u64().unwrap_or(0) as u32,
-                            origin: Origin::Found,
-                        });
-                    }
-                }
-                Some("error") => {
-                    let _ = tx.send(FinderEvent::Note(event["message"].as_str().unwrap_or_default().into()));
-                }
-                _ => {}
+        let callback = move |event: Value| match event["t"].as_str() {
+            Some("stage") => {
+                let _ = tx.send(FinderEvent::Stage(
+                    event["stage"].as_str().unwrap_or_default().into(),
+                ));
             }
+            Some("progress") => {
+                let n = |k: &str| event[k].as_u64().unwrap_or(0) as usize;
+                let _ = tx.send(FinderEvent::Progress(Progress {
+                    candidates: n("candidates"),
+                    tcp_done: n("tcp_done"),
+                    tcp_open: n("tcp_open"),
+                    real_done: n("real_done"),
+                    alive: n("alive"),
+                }));
+            }
+            Some("alive") => {
+                if let Ok(info) = serde_json::from_value::<LinkInfoWire>(event["info"].clone()) {
+                    *counter.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+                    let _ = tx.send(FinderEvent::Alive {
+                        info: info.into(),
+                        delay_ms: event["delay_ms"].as_u64().unwrap_or(0) as u32,
+                        origin: Origin::Found,
+                    });
+                }
+            }
+            Some("error") => {
+                let _ = tx.send(FinderEvent::Note(
+                    event["message"].as_str().unwrap_or_default().into(),
+                ));
+            }
+            _ => {}
         };
         (found, callback)
     };
     let (found, callback) = forward;
     let reason = stream(
-        move |sink, cancel| async move { zero_discovery::discover(discover, sink, cancel).await.as_str().to_string() },
+        move |sink, cancel| async move {
+            zero_discovery::discover(discover, sink, cancel)
+                .await
+                .as_str()
+                .to_string()
+        },
         callback,
         &cancel,
     )
@@ -301,7 +330,12 @@ where
         move |sink, cancel| async move {
             job(sink, cancel).await;
         },
-        move |event| sink_store.lock().unwrap_or_else(|p| p.into_inner()).push(event),
+        move |event| {
+            sink_store
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(event)
+        },
         cancel,
     )
     .await;
@@ -339,14 +373,23 @@ pub struct Tally {
 
 impl Tally {
     pub fn ok(&mut self, key: &str, ms: u32) {
-        self.results.insert(key.into(), TestResult { id: key.into(), ok: true, ms });
+        self.results.insert(
+            key.into(),
+            TestResult {
+                id: key.into(),
+                ok: true,
+                ms,
+            },
+        );
     }
 
     /// A failure never overwrites a success seen in the same search.
     pub fn failed(&mut self, key: &str) {
-        self.results
-            .entry(key.into())
-            .or_insert(TestResult { id: key.into(), ok: false, ms: 0 });
+        self.results.entry(key.into()).or_insert(TestResult {
+            id: key.into(),
+            ok: false,
+            ms: 0,
+        });
     }
 
     pub fn is_empty(&self) -> bool {
@@ -397,10 +440,21 @@ mod tests {
         tally.failed("b");
         let mut results = tally.take();
         results.sort_by(|x, y| x.id.cmp(&y.id));
-        assert_eq!(results, vec![
-            TestResult { id: "a".into(), ok: true, ms: 120 },
-            TestResult { id: "b".into(), ok: false, ms: 0 },
-        ]);
+        assert_eq!(
+            results,
+            vec![
+                TestResult {
+                    id: "a".into(),
+                    ok: true,
+                    ms: 120
+                },
+                TestResult {
+                    id: "b".into(),
+                    ok: false,
+                    ms: 0
+                },
+            ]
+        );
         assert!(tally.is_empty());
     }
 
@@ -418,7 +472,10 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             events.push(event);
         }
-        assert!(matches!(events.last(), Some(FinderEvent::Done { alive: 0, .. })), "{events:?}");
+        assert!(
+            matches!(events.last(), Some(FinderEvent::Done { alive: 0, .. })),
+            "{events:?}"
+        );
     }
 
     #[tokio::test]
@@ -427,7 +484,9 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let request = FinderRequest {
-            history: vec!["vless://00000000-0000-0000-0000-000000000000@127.0.0.1:9?security=none#x".into()],
+            history: vec![
+                "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:9?security=none#x".into(),
+            ],
             use_crowd: false,
             ..FinderRequest::default()
         };
@@ -436,6 +495,12 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             last = Some(event);
         }
-        assert_eq!(last, Some(FinderEvent::Done { alive: 0, reason: "cancelled".into() }));
+        assert_eq!(
+            last,
+            Some(FinderEvent::Done {
+                alive: 0,
+                reason: "cancelled".into()
+            })
+        );
     }
 }
