@@ -173,6 +173,7 @@ fun HomeScreen(
                             Column {
                                 Spacer(Modifier.height(12.dp))
                                 StatsCard(state.stats, conn.since, state.now)
+                                CdnNotice(state.stats.cdn)
                             }
                         }
                     }
@@ -387,6 +388,24 @@ private fun ServerCard(state: HomeState, onClick: () -> Unit) {
             Icon(ZeroIcons.ChevronEnd, null, tint = c.muted, modifier = Modifier.size(20.dp))
         }
     }
+}
+
+/** One line when the core had to work around Cloudflare throttling, or gave
+ *  up on Cloudflare CDN configs, on this network. Nothing otherwise. */
+@Composable
+private fun CdnNotice(cdn: String) {
+    val text = when (cdn) {
+        "fragment" -> R.string.cdn_throttled_split
+        "ech" -> R.string.cdn_throttled_ech
+        "blocked" -> R.string.cdn_blocked
+        else -> return
+    }
+    Text(
+        stringResource(text),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+    )
 }
 
 @Composable

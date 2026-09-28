@@ -519,4 +519,7 @@
     <string name="badge_skipped">Atlanıyor</string>
     <string name="settings_speed_floor_adaptive">Uyarlanabilir</string>
     <string name="settings_speed_floor_adaptive_hint">Hızınızı öğrenir ve son sunucularınızdan çok daha yavaş olanı bırakır</string>
+    <string name="cdn_throttled_split">Cloudflare bu ağda kısıtlanıyor; geçmek için el sıkışma bölünüyor.</string>
+    <string name="cdn_throttled_ech">Cloudflare bu ağda kısıtlanıyor; geçmek için sunucu adı gizleniyor.</string>
+    <string name="cdn_blocked">Cloudflare CDN yapılandırmaları bu ağda çalışmıyor, bu yüzden atlanıyor.</string>
 </resources>

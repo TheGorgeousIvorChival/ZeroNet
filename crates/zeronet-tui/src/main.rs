@@ -4119,7 +4119,7 @@ impl App<'_> {
             // goes nowhere.
             local_dns: zero_config::LocalDns::Google,
             anti_sanction_dns: zero_config::AntiSanctionDns::parse(&self.settings.anti_sanction)
-                .unwrap_or(zero_config::AntiSanctionDns::Shecan),
+                .unwrap_or(zero_config::AntiSanctionDns::Auto),
             manage_assets: false,
             ..zero_config::IranPreset::default()
         };
@@ -4728,7 +4728,9 @@ impl App<'_> {
             ComponentId::SettingAntiSanctionCycle => {
                 self.settings.anti_sanction = cycle(
                     &self.settings.anti_sanction,
-                    &["shecan", "electro", "begzar", "none"],
+                    &[
+                        "auto", "bertina", "shecan", "electro", "ipm", "begzar", "radar", "none",
+                    ],
                 );
                 self.save_and_report(format!(
                     "Anti-sanction DNS: {}",
@@ -5524,7 +5526,7 @@ fn seed_sample_configs(db: &Database) -> Result<()> {
         http_port: Some(10809),
         remote_dns: zero_config::RemoteDns::Google,
         local_dns: zero_config::LocalDns::Google,
-        anti_sanction_dns: zero_config::AntiSanctionDns::Shecan,
+        anti_sanction_dns: zero_config::AntiSanctionDns::Auto,
         manage_assets: false,
         ..zero_config::IranPreset::default()
     };

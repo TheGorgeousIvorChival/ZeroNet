@@ -685,6 +685,16 @@ fn stats_value() -> Option<serde_json::Value> {
         "down": stats.downloaded.load(Ordering::Relaxed),
         "sessions": running.server.active_sessions(),
         "tags": tags,
+        "cdn": stats.cdn_condition(),
+        "cdn_notice": stats.cdn_condition().notice(),
+        // Measured techniques for the opt-in crowd report; ids from a fixed
+        // vocabulary only (zero-discovery `crowd::METHODS`).
+        "methods": running
+            .server
+            .method_observations()
+            .into_iter()
+            .map(|(id, ok)| serde_json::json!({"id": id, "ok": ok}))
+            .collect::<Vec<_>>(),
     }))
 }
 

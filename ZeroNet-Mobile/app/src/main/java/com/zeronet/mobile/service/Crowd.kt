@@ -163,8 +163,16 @@ object Crowd {
      * main thread. Quietly does nothing when no relay is known or none
      * answers: sharing must never get in the way of connecting.
      */
-    fun report(context: Context, localNetwork: String, results: List<Result>, clean: List<CleanIp>, tunnel: Proxy?) {
-        if (results.isEmpty() && clean.isEmpty()) return
+    fun report(
+        context: Context,
+        localNetwork: String,
+        results: List<Result>,
+        clean: List<CleanIp>,
+        tunnel: Proxy?,
+        methods: JSONArray? = null,
+    ) {
+        val methodCount = methods?.length() ?: 0
+        if (results.isEmpty() && clean.isEmpty() && methodCount == 0) return
         val relays = read(file(context))?.optJSONArray("relays")?.let { a -> List(a.length()) { a.optString(it) } }
             ?.filter { it.startsWith("https://") }.orEmpty()
         if (relays.isEmpty()) return
@@ -175,6 +183,8 @@ object Crowd {
             .put("nonce", dailyNonce(context))
             .put("results", JSONArray().also { a -> results.take(MAX_RESULTS).forEach { a.put(JSONObject().put("id", it.id).put("ok", it.ok).put("ms", it.ms)) } })
             .put("clean", JSONArray().also { a -> clean.take(MAX_CLEAN).forEach { a.put(JSONObject().put("ip", it.ip).put("ms", it.ms)) } })
+            // Techniques the core measured here, ids from its fixed vocabulary.
+            .apply { if (methodCount > 0) put("methods", methods) }
             .apply { if (net != null) put("net", net) }
             .toString()
         // Through the tunnel the relay sees the VPN server, not this network,

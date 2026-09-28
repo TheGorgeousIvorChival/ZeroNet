@@ -706,6 +706,25 @@ object Engine {
         scope.launch(Dispatchers.IO) { Crowd.report(app, network, results, emptyList(), tunnel) }
     }
 
+    /** The last method measurement reported, with its network, so each one is
+     *  sent once rather than every second. */
+    private var reportedMethods: String? = null
+
+    /**
+     * Share what the core measured about built-in techniques (CDN handling,
+     * which anti-sanction resolver relays) when the user allows it: once per
+     * new measurement, filed under the network it was measured on. The core
+     * measures a few seconds after connecting, so this runs from the stats
+     * loop rather than with the connect's server results.
+     */
+    private fun reportMethods(methods: org.json.JSONArray, network: String) {
+        val key = "$network|$methods"
+        if (!settings.shareResults || key == reportedMethods) return
+        reportedMethods = key
+        val tunnel = tunnelProxy()
+        scope.launch(Dispatchers.IO) { Crowd.report(app, network, emptyList(), emptyList(), tunnel, methods) }
+    }
+
     /** The local HTTP proxy into the tunnel, while it is up. */
     private fun tunnelProxy(): java.net.Proxy? =
         if (running) java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", settings.httpPort)) else null
@@ -989,7 +1008,7 @@ object Engine {
             .put("block_quic", s.blockQuic && s.profile != ConnectionProfile.Gaming)
             // Fragmenting the ClientHello costs round trips; Fast and Gaming skip it.
             .put("evasion", if (s.profile != ConnectionProfile.Normal) "off" else when (s.evasion) { EvasionLevel.Off -> "off"; EvasionLevel.Auto -> "auto"; EvasionLevel.Strong -> "strong"; EvasionLevel.Smart -> "smart" })
-            .put("fragment_packets", s.fragmentPackets.trim().ifEmpty { "tlshello" })
+            .put("fragment_packets", s.fragmentPackets.trim().ifEmpty { "1-1" })
             .put("dns", JSONObject().put("remote", s.remoteDns.name.lowercase()).put("custom", s.customDns.trim()).put("local", "google").put("anti_sanction", s.antiSanctionDns.name.lowercase()).put("custom_anti_sanction", s.customAntiSanction.trim()).put("fakedns", s.fakeDns))
             // The user's own scan first, then what others found on this network.
             .put("clean_ips", JSONArray((scan.value.results.take(10).map { "${it.ip}:${it.port}" } + crowdCleanIps).distinct().take(20)))
@@ -1048,7 +1067,8 @@ object Engine {
                 if (downHistory.size == 60) downHistory.removeFirst()
                 if (upHistory.size == 60) upHistory.removeFirst()
                 downHistory.addLast(downRate); upHistory.addLast(upRate)
-                val next = TrafficStats(upRate, downRate, up, down, downHistory.toList(), upHistory.toList())
+                val next = TrafficStats(upRate, downRate, up, down, downHistory.toList(), upHistory.toList(), o.optString("cdn"))
+                o.optJSONArray("methods")?.takeIf { it.length() > 0 }?.let { reportMethods(it, NetworkIdentity.current(app) ?: network) }
                 stats.value = next
                 if (interactive && tick % 2 == 0L) host?.onStats(next)
                 if (upRate + downRate > 0) lastTrafficAt = System.currentTimeMillis()

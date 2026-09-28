@@ -175,6 +175,9 @@ data class TrafficStats(
     /** Recent download rates (oldest first), one sample per second, max 60. */
     val downHistory: List<Long> = emptyList(),
     val upHistory: List<Long> = emptyList(),
+    /** How the core handles Cloudflare CDN configs on this network: "",
+     *  "unknown", "clear", "fragment", "ech" or "blocked". */
+    val cdn: String = "",
 )
 
 @Immutable

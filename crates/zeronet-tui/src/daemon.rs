@@ -57,6 +57,9 @@ pub struct DaemonStats {
     /// mode while TUN failed for want of privileges, and the UI needs to say
     /// so rather than implying the whole system is tunnelled.
     pub tun_active: bool,
+    /// One sentence from the engine about Cloudflare CDN configs on this
+    /// network (throttled and worked around, or skipped), when it has one.
+    pub cdn_notice: Option<&'static str>,
     /// Incremented on every status transition, so the UI can tell a new
     /// failure from a stale one it has already reported.
     pub revision: u64,
@@ -75,6 +78,7 @@ impl Default for DaemonStats {
             status: ConnectionStatus::Disconnected,
             error_msg: None,
             tun_active: false,
+            cdn_notice: None,
             revision: 0,
         }
     }
@@ -157,7 +161,7 @@ impl Default for EngineOptions {
             mux_enabled: false,
             mux_concurrency: 8,
             fragment_enabled: false,
-            tls_fragment_size: 150,
+            tls_fragment_size: 60,
             sni_spoof: false,
             keepalive_interval_secs: 30,
             tcp_congestion: String::new(),
@@ -418,6 +422,7 @@ impl ZeroNetDaemon {
                                     up_diff * 2, // 500 ms window
                                     down_diff * 2,
                                     snapshot.succeeded.saturating_sub(snapshot.failed),
+                                    snapshot.cdn_notice,
                                 );
                                 let current = (
                                     st.upload_bytes,
@@ -425,6 +430,7 @@ impl ZeroNetDaemon {
                                     st.upload_speed_bps,
                                     st.download_speed_bps,
                                     st.active_connections,
+                                    st.cdn_notice,
                                 );
                                 if next == current {
                                     return false;
@@ -434,6 +440,7 @@ impl ZeroNetDaemon {
                                 st.upload_speed_bps = next.2;
                                 st.download_speed_bps = next.3;
                                 st.active_connections = next.4;
+                                st.cdn_notice = next.5;
                                 true
                             });
                             continue;
@@ -846,7 +853,7 @@ pub fn prepare_runnable_config_with(raw_config: &str, options: &EngineOptions) -
             http_port: Some(options.http_port),
             remote_dns: zero_config::RemoteDns::Google,
             local_dns: zero_config::LocalDns::Google,
-            anti_sanction_dns: zero_config::AntiSanctionDns::Shecan,
+            anti_sanction_dns: zero_config::AntiSanctionDns::Auto,
             fragment: options.fragment_enabled,
             manage_assets: false,
             ..zero_config::IranPreset::default()
@@ -1329,12 +1336,14 @@ fn apply_evasion(outbound: &mut serde_json::Value, options: &EngineOptions) {
     }
 }
 
-/// `{"packets": "tlshello", "length": "100-200", "interval": "1-1"}` — the
-/// fragment shape for a link-form outbound's `evasion` overlay.
+/// `{"packets": "1-1", "length": "40-80", "interval": "1-1"}` — the fragment
+/// shape for a link-form outbound's `evasion` overlay. Plain TCP segments:
+/// `tlshello` record re-framing stopped getting through in Iran (measured
+/// 2026-09-28; see `zero_config::FragmentConfig::default`).
 fn fragment_overlay(options: &EngineOptions) -> serde_json::Value {
     let (min, max) = options.fragment_length_range();
     serde_json::json!({
-        "packets": "tlshello",
+        "packets": "1-1",
         "length": format!("{min}-{max}"),
         "interval": "1-1",
     })
@@ -2412,9 +2421,9 @@ mod tests {
             ..EngineOptions::default()
         };
         assert_eq!(tiny.fragment_length_range(), (14, 26));
-        // The historic default must keep its historic shape.
+        // The default is the 40-80 byte shape that got through in Iran.
         let default = EngineOptions::default();
-        assert_eq!(default.fragment_length_range(), (100, 200));
+        assert_eq!(default.fragment_length_range(), (40, 80));
     }
 
     #[test]
