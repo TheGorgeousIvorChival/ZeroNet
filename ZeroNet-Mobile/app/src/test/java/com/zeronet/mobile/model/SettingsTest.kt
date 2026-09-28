@@ -7,6 +7,15 @@ import org.junit.Test
 class SettingsTest {
 
     @Test
+    fun `the old tlshello default moves to 1-1 once, a later choice is kept`() {
+        val old = JSONObject().put("fragmentPackets", "tlshello")
+        assertEquals("1-1", Settings.fromJson(old).fragmentPackets)
+
+        val chosen = Settings(fragmentPackets = "tlshello").toJson()
+        assertEquals("tlshello", Settings.fromJson(chosen).fragmentPackets)
+    }
+
+    @Test
     fun `every field survives a JSON round trip`() {
         val original = Settings(
             mode = ConnectionMode.Proxy,

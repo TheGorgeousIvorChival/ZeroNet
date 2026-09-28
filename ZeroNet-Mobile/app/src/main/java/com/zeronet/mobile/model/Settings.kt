@@ -43,7 +43,7 @@ enum class RemoteDns { Cloudflare, Google, Quad9, AdGuard }
 
 /** Iranian anti-sanction resolvers for services that block Iranian IPs. Mirrors
  *  zero-config `AntiSanctionDns`; [Off] resolves those names like any other. */
-enum class AntiSanctionDns { Shecan, Electro, Begzar, Radar, Off }
+enum class AntiSanctionDns { Auto, Bertina, Shecan, Electro, Ipm, Begzar, Radar, Off }
 
 /**
  * Every user preference, as one immutable value. The UI process owns it
@@ -103,13 +103,14 @@ data class Settings(
     val customDns: String = "",
     /** Domestic resolver for sanctioned services (OpenAI, GitHub, …) that block
      *  Iranian IPs; they resolve here and route direct. */
-    val antiSanctionDns: AntiSanctionDns = AntiSanctionDns.Shecan,
+    val antiSanctionDns: AntiSanctionDns = AntiSanctionDns.Auto,
     /** A user-supplied anti-sanction resolver that overrides [antiSanctionDns]
      *  when non-blank. Same rule as [customDns]: an IP or IP-addressed DoH/DoT. */
     val customAntiSanction: String = "",
-    /** ClientHello fragment writes for Strong/Smart evasion: "tlshello", or a
-     *  range like "1-1" as a fallback when tlshello stops getting through. */
-    val fragmentPackets: String = "tlshello",
+    /** ClientHello fragment writes for Strong/Smart evasion: a range like
+     *  "1-1" (plain TCP segments, the default), or "tlshello", which stopped
+     *  getting through in Iran in September 2026. */
+    val fragmentPackets: String = "1-1",
     val fakeDns: Boolean = true,
     val blockAds: Boolean = true,
     // Appearance
@@ -175,8 +176,10 @@ data class Settings(
         .put("remoteDns", remoteDns.name)
         .put("customDns", customDns)
         .put("antiSanctionDns", antiSanctionDns.name)
+        .put("antiSanctionChosen", true)
         .put("customAntiSanction", customAntiSanction)
         .put("fragmentPackets", fragmentPackets)
+        .put("fragmentPacketsChosen", true)
         .put("fakeDns", fakeDns)
         .put("blockAds", blockAds)
         .put("themeMode", themeMode.name)
@@ -219,9 +222,18 @@ data class Settings(
                 blockQuic = o.optBoolean("blockQuic", d.blockQuic),
                 remoteDns = o.enumOr("remoteDns", d.remoteDns),
                 customDns = o.optString("customDns", d.customDns),
-                antiSanctionDns = o.enumOr("antiSanctionDns", d.antiSanctionDns),
+                // Shecan saved before the measured "Auto" existed was the old
+                // default; move it once. A choice saved since is kept.
+                antiSanctionDns = o.enumOr("antiSanctionDns", d.antiSanctionDns).let {
+                    if (it == AntiSanctionDns.Shecan && !o.has("antiSanctionChosen")) d.antiSanctionDns else it
+                },
                 customAntiSanction = o.optString("customAntiSanction", d.customAntiSanction),
-                fragmentPackets = o.optString("fragmentPackets", d.fragmentPackets),
+                // "tlshello" saved before September 2026 was the old default,
+                // which stopped getting through in Iran; move it to the new one
+                // once. A choice saved since carries the marker and is kept.
+                fragmentPackets = o.optString("fragmentPackets", d.fragmentPackets).let {
+                    if (it == "tlshello" && !o.has("fragmentPacketsChosen")) d.fragmentPackets else it
+                },
                 fakeDns = o.optBoolean("fakeDns", d.fakeDns),
                 blockAds = o.optBoolean("blockAds", d.blockAds),
                 themeMode = o.enumOr("themeMode", d.themeMode),

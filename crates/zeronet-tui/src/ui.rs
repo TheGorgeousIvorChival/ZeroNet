@@ -519,6 +519,16 @@ impl<'a> UiRenderer<'a> {
                 ]));
             }
         }
+        // What the engine did about Cloudflare CDN configs on this network.
+        if let (1, true, Some(notice)) = (lines.len(), connected, self.stats.cdn_notice) {
+            lines.push(Line::from(vec![
+                Span::styled("   ↳ ", Style::default().fg(self.theme.warn)),
+                Span::styled(
+                    truncate(notice, inner.width.saturating_sub(6) as usize),
+                    Style::default().fg(self.theme.warn),
+                ),
+            ]));
+        }
         // The finder's progress, when it searches and the row is free.
         if lines.len() == 1 {
             if let Some(status) = self.finder_status.as_deref() {

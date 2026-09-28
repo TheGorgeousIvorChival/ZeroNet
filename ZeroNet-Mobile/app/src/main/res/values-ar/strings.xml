@@ -539,4 +539,7 @@
     <string name="badge_skipped">مستبعد</string>
     <string name="settings_speed_floor_adaptive">تكيفي</string>
     <string name="settings_speed_floor_adaptive_hint">يتعلم سرعتك ويترك الخادم الأبطأ كثيرًا من خوادمك الأخيرة</string>
+    <string name="cdn_throttled_split">Cloudflare مقيّد على هذه الشبكة؛ يُقسَّم الاتصال الأولي لتجاوز ذلك.</string>
+    <string name="cdn_throttled_ech">Cloudflare مقيّد على هذه الشبكة؛ يُخفى اسم الخادم لتجاوز ذلك.</string>
+    <string name="cdn_blocked">إعدادات CDN من Cloudflare لا تعمل على هذه الشبكة، لذا يتم تخطيها.</string>
 </resources>

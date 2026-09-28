@@ -710,10 +710,13 @@ private fun EvasionCard(s: Settings, q: SettingsQuery, reconnect: Boolean, actio
                         val enabled = s.customAntiSanction.isBlank()
                         ZeroChip(
                             text = when (dns) {
+                                AntiSanctionDns.Auto -> stringResource(R.string.option_auto)
+                                AntiSanctionDns.Bertina -> "Bertina"
                                 AntiSanctionDns.Shecan -> "Shecan"
                                 AntiSanctionDns.Electro -> "Electro"
                                 AntiSanctionDns.Begzar -> "Begzar"
                                 AntiSanctionDns.Radar -> "Radar"
+                                AntiSanctionDns.Ipm -> "IPM"
                                 AntiSanctionDns.Off -> stringResource(R.string.option_off)
                             },
                             selected = enabled && s.antiSanctionDns == dns,

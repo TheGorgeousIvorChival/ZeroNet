@@ -521,4 +521,7 @@
     <string name="detail_auto_select">Use for automatic picks</string>
     <string name="detail_auto_select_hint">Off: auto-connect and switching skip this server. You can still tap it to connect.</string>
     <string name="badge_skipped">Skipped</string>
+    <string name="cdn_throttled_split">Cloudflare is throttled on this network; splitting the handshake to get through.</string>
+    <string name="cdn_throttled_ech">Cloudflare is throttled on this network; hiding the server name to get through.</string>
+    <string name="cdn_blocked">Cloudflare CDN configs don\'t work on this network, so they\'re skipped.</string>
 </resources>

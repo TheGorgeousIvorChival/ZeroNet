@@ -449,7 +449,7 @@ pub async fn report(
         .await
         .ok_or("crowd rankings unavailable, so no relay is known")?;
     let net = through_tunnel.then_some(zero_discovery::crowd::ANY_NET);
-    let answered = crowd_client::report(&rankings.relays, &nonce, net, &results, &[]).await?;
+    let answered = crowd_client::report(&rankings.relays, &nonce, net, &results, &[], &[]).await?;
     Ok(answered.filter(|net| !through_tunnel && net.starts_with("asn:")))
 }
 

@@ -189,10 +189,10 @@ impl Default for AppSettings {
             tun_mtu: 1500,
             remote_dns: "google".into(),
             custom_dns: "".into(),
-            anti_sanction: "shecan".into(),
+            anti_sanction: "auto".into(),
             socks_port: 10808,
             http_port: 10809,
-            tls_fragment_size: 150,
+            tls_fragment_size: 60,
             jitter_delay_ms: 15,
             scanner_concurrency: 50,
             clean_ip_rotation: true,
@@ -494,6 +494,7 @@ impl Database {
         };
 
         let mut settings = AppSettings::default();
+        let mut anti_sanction_chosen = false;
         let rows = stmt.query_map([], |row| {
             let k: String = row.get(0)?;
             let v: String = row.get(1)?;
@@ -513,6 +514,7 @@ impl Database {
                     "remote_dns" => settings.remote_dns = item.1,
                     "custom_dns" => settings.custom_dns = item.1,
                     "anti_sanction" => settings.anti_sanction = item.1,
+                    "anti_sanction_chosen" => anti_sanction_chosen = true,
                     "socks_port" => {
                         if let Ok(p) = item.1.parse() {
                             settings.socks_port = p;
@@ -633,6 +635,11 @@ impl Database {
                 }
             }
         }
+        // "shecan" saved before the measured "auto" existed was the old
+        // default; move it once. A choice saved since carries the marker.
+        if settings.anti_sanction == "shecan" && !anti_sanction_chosen {
+            settings.anti_sanction = "auto".into();
+        }
         settings
     }
 
@@ -650,6 +657,7 @@ impl Database {
             ("remote_dns", &settings.remote_dns),
             ("custom_dns", &settings.custom_dns),
             ("anti_sanction", &settings.anti_sanction),
+            ("anti_sanction_chosen", "1"),
             ("socks_port", &settings.socks_port.to_string()),
             ("http_port", &settings.http_port.to_string()),
             ("tls_fragment_size", &settings.tls_fragment_size.to_string()),

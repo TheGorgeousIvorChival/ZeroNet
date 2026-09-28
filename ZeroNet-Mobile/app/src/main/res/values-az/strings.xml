@@ -520,4 +520,7 @@
     <string name="badge_skipped">Ötürülür</string>
     <string name="settings_speed_floor_adaptive">Uyğunlaşan</string>
     <string name="settings_speed_floor_adaptive_hint">Sürətinizi öyrənir və son serverlərinizdən xeyli yavaş olanı buraxır</string>
+    <string name="cdn_throttled_split">Cloudflare bu şəbəkədə məhdudlaşdırılır; keçmək üçün əl sıxma bölünür.</string>
+    <string name="cdn_throttled_ech">Cloudflare bu şəbəkədə məhdudlaşdırılır; keçmək üçün server adı gizlədilir.</string>
+    <string name="cdn_blocked">Cloudflare CDN konfiqurasiyaları bu şəbəkədə işləmir, ona görə keçilir.</string>
 </resources>
