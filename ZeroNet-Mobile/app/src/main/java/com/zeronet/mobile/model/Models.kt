@@ -21,6 +21,9 @@ data class Server(
     val country: String,
     val source: String,
     val favorite: Boolean = false,
+    /** The user ruled this server out of automatic selection; it stays in the
+     *  list and can be connected to by hand, but discovery/switching skip it. */
+    val excluded: Boolean = false,
     /** Last measured real delay in ms, or -1 when the last test failed / never tested. */
     val delayMs: Int = -1,
     val lastTestedAt: Long = 0,

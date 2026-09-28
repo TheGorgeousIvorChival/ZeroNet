@@ -752,6 +752,45 @@ pub extern "system" fn Java_com_zeronet_mobile_core_ZrayNative_parseLinks<'local
     java_string(&mut env, &answer.to_string())
 }
 
+/// `frontLinks(requestJson): String` — `{"links": […]}`. The request is
+/// `{"links": […], "seed": n, "max": n}`: each CDN-fronted TLS link is
+/// re-aimed at a bounded sample of Cloudflare edge IPs (SNI and Host kept),
+/// so a blocked address or port is routed around without a new server.
+/// Links that cannot be fronted (REALITY, plain TCP-TLS, no TLS) add nothing.
+#[no_mangle]
+pub extern "system" fn Java_com_zeronet_mobile_core_ZrayNative_frontLinks<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    request_json: JString<'local>,
+) -> jstring {
+    let answer = contained(
+        "frontLinks",
+        || json!({"links": [], "error": "frontLinks failed internally"}),
+        || {
+            let request = read_string(&mut env, &request_json).and_then(|text| {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .map_err(|error| format!("request is not valid JSON: {error}"))
+            });
+            match request {
+                Ok(request) => {
+                    let links: Vec<String> = request["links"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|l| l.as_str().map(str::to_string))
+                        .collect();
+                    let seed = request["seed"].as_u64().unwrap_or(0);
+                    // Bounded however the caller asks: every variant is a probe.
+                    let max = request["max"].as_u64().unwrap_or(18).min(64) as usize;
+                    json!({"links": zero_discovery::front_via_edges(&links, seed, 1, max)})
+                }
+                Err(error) => json!({"links": [], "error": error}),
+            }
+        },
+    );
+    java_string(&mut env, &answer.to_string())
+}
+
 /// `verifySignature(publicKeyHex, body, signature): Boolean` — whether
 /// `signature` (an `ed25519:<hex>` line) is a valid Ed25519 signature over
 /// `body` for `publicKeyHex`. Used to authenticate the crowd-data lists.

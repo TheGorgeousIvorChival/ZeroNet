@@ -110,6 +110,7 @@ pub enum ComponentId {
     SettingSniffRouteOnlyToggle,
     SettingFingerprintCycle,
     SettingFragmentToggle,
+    SettingSniSpoofToggle,
     SettingTunDeviceName,
     SettingTunAutoRouteToggle,
     SettingTunStrictRouteToggle,

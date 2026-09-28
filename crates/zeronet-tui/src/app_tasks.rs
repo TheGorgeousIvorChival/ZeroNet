@@ -821,6 +821,8 @@ impl App<'_> {
         let candidates: Vec<Candidate> = self
             .configs
             .iter()
+            // A profile the user excluded is never switched *to* automatically.
+            .filter(|config| !config.excluded)
             .map(|config| Candidate {
                 id: config.id,
                 ping_ms: config.ping_ms,

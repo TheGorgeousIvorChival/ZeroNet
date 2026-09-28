@@ -35,6 +35,22 @@ pub const RESUME_PROBE_GAP: Duration = Duration::from_secs(15);
 /// probe is meaningful in.
 pub const QUIET_GAP: Duration = Duration::from_secs(20);
 
+/// Upload rate (bytes/s) that counts as real use on its own. Below it, bytes
+/// that only go *out* are no proof: a dead tunnel still counts every retry an
+/// application writes into it, so upload-only traffic at a trickle is exactly
+/// what a broken connection looks like.
+pub const UPLOAD_ALIVE_BPS: u64 = 32 * 1024;
+
+/// Whether a counter tick proves the tunnel carries traffic.
+///
+/// Bytes coming *back* are the proof — they had to cross the server. Bytes
+/// going out are counted as soon as the outbound is dialled, before anything
+/// answers, so on their own they only count when they move at a rate a real
+/// upload does, not the trickle of an application retrying a dead path.
+pub fn proves_traffic(prev_download: u64, next_download: u64, upload_bps: u64) -> bool {
+    next_download > prev_download || upload_bps >= UPLOAD_ALIVE_BPS
+}
+
 /// No input for this long means the user left; the next keystroke is a
 /// return, not a continuation.
 pub const AWAY_GAP: Duration = Duration::from_secs(3);
@@ -230,6 +246,16 @@ mod tests {
 
     fn candidate(id: i64, ping_ms: Option<f64>, found: bool) -> Candidate {
         Candidate { id, ping_ms, found }
+    }
+
+    #[test]
+    fn upload_only_retries_do_not_count_as_a_working_tunnel() {
+        // A dead tunnel: applications keep writing retries, nothing returns.
+        assert!(!proves_traffic(1_000, 1_000, 900));
+        // Anything coming back proves the path.
+        assert!(proves_traffic(1_000, 1_001, 0));
+        // A real upload with no reply yet still counts as use.
+        assert!(proves_traffic(1_000, 1_000, UPLOAD_ALIVE_BPS));
     }
 
     #[test]

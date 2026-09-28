@@ -892,6 +892,7 @@ impl<'a> App<'a> {
             mux_enabled: self.settings.mux_enabled,
             mux_concurrency: self.settings.mux_concurrency,
             fragment_enabled: self.settings.fragment_enabled,
+            sni_spoof: self.settings.sni_spoof,
             tls_fragment_size: self.settings.tls_fragment_size,
             keepalive_interval_secs: self.settings.keepalive_interval_secs,
             tcp_congestion: self.settings.tcp_congestion.clone(),
@@ -1400,10 +1401,15 @@ impl<'a> App<'a> {
         let new_revision = next.revision > self.reported_revision;
         // Bytes moved: the watchdog does not need to probe a tunnel that is
         // visibly carrying traffic, and the occasional background search
-        // waits for a quiet moment.
-        if next.upload_bytes != self.stats.upload_bytes
-            || next.download_bytes != self.stats.download_bytes
-        {
+        // waits for a quiet moment. Only bytes that came back count (or a real
+        // upload rate): a dead tunnel still counts every retry written into
+        // it, and treating that as traffic kept the watchdog from ever probing
+        // — and so from ever switching — a broken connection.
+        if zeronet_tui::health::proves_traffic(
+            self.stats.download_bytes,
+            next.download_bytes,
+            next.upload_speed_bps,
+        ) {
             self.bg.last_traffic = Some(Instant::now());
         }
         self.stats = next;
@@ -2519,6 +2525,7 @@ impl<'a> App<'a> {
             Command::Duplicate => self.duplicate_selection(),
             Command::Delete => self.request_delete(),
             Command::Rename => self.request_rename(),
+            Command::ToggleExcluded => self.toggle_excluded(),
             Command::ShowQrCode => self.show_qr_code(),
             Command::ScanQrImage => self.open_text_modal(
                 "Scan QR Image",
@@ -2599,6 +2606,46 @@ impl<'a> App<'a> {
         self.visible_configs()
             .get(self.selected_config_idx)
             .map(|c| c.id)
+    }
+
+    /// Rule the selected (or ticked) profiles in or out of automatic selection.
+    /// One key toggles: if any target is currently available, exclude them all;
+    /// otherwise bring them back. Excluded profiles stay in the list and can
+    /// still be connected to by hand — the watchdog and finder just skip them.
+    fn toggle_excluded(&mut self) {
+        // A bare letter key: only act where the server list is on screen, so a
+        // stray press on another page cannot quietly change a profile.
+        if self.active_tab != ActiveTab::Dashboard {
+            return;
+        }
+        let targets = self.action_targets();
+        if targets.is_empty() {
+            self.toasts
+                .warning("Select a profile to exclude or include.");
+            return;
+        }
+        let exclude = targets
+            .iter()
+            .any(|id| self.config_by_id(*id).is_some_and(|c| !c.excluded));
+        let mut changed = 0usize;
+        for id in &targets {
+            if self.db.set_excluded(*id, exclude).is_ok() {
+                changed += 1;
+            }
+        }
+        self.reload_configs();
+        let verb = if exclude { "excluded from" } else { "back in" };
+        if changed == 1 {
+            let name = self
+                .config_by_id(targets[0])
+                .map(|c| c.remark.clone())
+                .unwrap_or_else(|| "Profile".into());
+            self.toasts
+                .info(format!("\"{name}\" {verb} automatic selection."));
+        } else {
+            self.toasts
+                .info(format!("{changed} profiles {verb} automatic selection."));
+        }
     }
 
     /// Profiles a bulk command should act on: the ticked set, or the
@@ -4811,6 +4858,18 @@ impl App<'_> {
                     "TLS fragmentation {}",
                     on_off(self.settings.fragment_enabled)
                 ));
+                self.reapply_engine_settings().await?;
+            }
+            ComponentId::SettingSniSpoofToggle => {
+                self.settings.sni_spoof = !self.settings.sni_spoof;
+                // The decoy is a raw packet, so it only goes out when the
+                // engine runs with root/CAP_NET_RAW; say so rather than let
+                // the toggle look like it did nothing.
+                self.save_and_report(if self.settings.sni_spoof {
+                    "SNI spoofing on (needs root; skipped without it)".to_string()
+                } else {
+                    "SNI spoofing off".to_string()
+                });
                 self.reapply_engine_settings().await?;
             }
             ComponentId::SettingTunAutoRouteToggle => {

@@ -21,7 +21,7 @@ const VALUE_WIDTH: usize = 20;
 /// Rows when Advanced is folded: four headings plus the everyday settings.
 pub(crate) const SETTINGS_ROWS_BASIC: usize = 31;
 /// Rows when Advanced is open, including the edge-scanner block.
-pub(crate) const SETTINGS_ROWS: usize = 60;
+pub(crate) const SETTINGS_ROWS: usize = 61;
 
 impl UiRenderer<'_> {
     /// Total lines the settings page needs, for the scrollbar.
@@ -530,6 +530,15 @@ impl UiRenderer<'_> {
                 } else {
                     "needs TLS Fragmentation"
                 },
+            );
+            self.toggle_row(
+                frame,
+                row(),
+                ComponentId::SettingSniSpoofToggle,
+                "SNI Spoofing",
+                self.settings.sni_spoof,
+                "ACTIVE",
+                "INACTIVE",
             );
             self.stepper_row(
                 frame,

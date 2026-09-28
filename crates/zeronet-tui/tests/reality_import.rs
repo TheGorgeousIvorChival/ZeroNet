@@ -182,3 +182,34 @@ fn a_plain_tls_link_is_not_given_a_shape_it_did_not_ask_for() {
     );
     assert_eq!(validate_profile(&link, &default_options()), Ok(()));
 }
+
+#[test]
+fn an_explicit_reality_shape_the_user_chose_is_kept() {
+    // A REALITY-usable fingerprint the profile already carries must survive
+    // preparation: defaulting it to chrome would override a deliberate choice.
+    let link = format!(
+        "vless://{UUID}@1.2.3.4:443?security=reality&sni={SERVER_NAME}&fp=firefox&pbk={PBK}&sid={SHORT_ID}&type=tcp#FF"
+    );
+    let config = prepared(&link);
+    let prepared_link = proxy(&config)["link"].as_str().expect("a link outbound");
+    assert_eq!(
+        link_field(prepared_link, "fp").as_deref(),
+        Some("firefox"),
+        "an explicit firefox REALITY shape was overwritten: {prepared_link}"
+    );
+    assert_eq!(validate_profile(&link, &default_options()), Ok(()));
+
+    // Same for raw JSON: firefox in realitySettings stays firefox.
+    let mut json: serde_json::Value =
+        serde_json::from_str(&raw_json(true)).expect("raw json parses");
+    json["outbounds"][0]["streamSettings"]["realitySettings"]["fingerprint"] =
+        serde_json::json!("firefox");
+    let json = json.to_string();
+    let config = prepared(&json);
+    let stream = &proxy(&config)["streamSettings"];
+    assert_eq!(
+        stream["realitySettings"]["fingerprint"], "firefox",
+        "an explicit firefox REALITY shape in JSON was overwritten: {stream}"
+    );
+    assert_eq!(validate_profile(&json, &default_options()), Ok(()));
+}

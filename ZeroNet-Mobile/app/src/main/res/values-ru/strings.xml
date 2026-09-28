@@ -524,4 +524,9 @@
     <string name="logs_copy">Копировать</string>
     <string name="logs_share">Поделиться</string>
     <string name="logs_clear">Очистить</string>
+    <string name="detail_auto_select">Использовать при автовыборе</string>
+    <string name="detail_auto_select_hint">Выкл.: автоподключение и переключение пропускают этот сервер. Нажмите на него, чтобы подключиться вручную.</string>
+    <string name="badge_skipped">Пропускается</string>
+    <string name="settings_speed_floor_adaptive">Адаптивный</string>
+    <string name="settings_speed_floor_adaptive_hint">Запоминает вашу скорость и уходит с сервера, который намного медленнее недавних</string>
 </resources>

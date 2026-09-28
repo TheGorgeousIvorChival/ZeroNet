@@ -1,3 +1,4 @@
+pub mod adaptive_speed;
 pub mod caps;
 pub mod clipboard;
 pub mod connect_orb;
@@ -13,6 +14,7 @@ pub mod health;
 pub mod imageview;
 pub mod interaction;
 pub mod keymap;
+pub mod linkcolor;
 pub mod manual_profile;
 pub mod modal;
 pub mod modal_anim;

@@ -384,6 +384,7 @@ private fun ConnectionCard(s: Settings, q: SettingsQuery, reconnect: Boolean, ac
                         SpeedFloor.Off -> R.string.settings_speed_floor_off_hint
                         SpeedFloor.Low -> R.string.settings_speed_floor_low_hint
                         SpeedFloor.Medium -> R.string.settings_speed_floor_medium_hint
+                        SpeedFloor.Adaptive -> R.string.settings_speed_floor_adaptive_hint
                         SpeedFloor.Custom -> R.string.settings_speed_floor_custom_hint
                     },
                 ),
@@ -396,6 +397,7 @@ private fun ConnectionCard(s: Settings, q: SettingsQuery, reconnect: Boolean, ac
                                 SpeedFloor.Off -> R.string.option_off
                                 SpeedFloor.Low -> R.string.settings_speed_floor_low
                                 SpeedFloor.Medium -> R.string.settings_speed_floor_medium
+                                SpeedFloor.Adaptive -> R.string.settings_speed_floor_adaptive
                                 SpeedFloor.Custom -> R.string.settings_speed_floor_custom
                             },
                         )

@@ -101,10 +101,16 @@ class ZeroVpnService : VpnService(), TunnelHost {
         } else {
             builder.addRoute("0.0.0.0", 0)
         }
-        if (settings.ipv6) {
-            builder.addAddress(TUN_V6, 126)
-            if (settings.bypassLan) builder.addRoute("2000::", 3) else builder.addRoute("::", 0)
-        }
+        // IPv6 is always *captured* — an interface address plus a default v6
+        // route — even when it is not tunnelled. Leaving it out was an IP leak:
+        // most mobile and home networks are dual-stack, so any app reaching a
+        // server over IPv6 (or resolving an AAAA via a resolver of its own)
+        // would carry traffic over the device's real IPv6 outside the tunnel,
+        // exposing the true address. Captured here, that traffic enters the tun
+        // instead — tunnelled when ipv6 is on, dropped by the core (no v6
+        // upstream) when it is off — but it can never escape.
+        builder.addAddress(TUN_V6, 126)
+        if (settings.bypassLan) builder.addRoute("2000::", 3) else builder.addRoute("::", 0)
         configureApps(builder, settings)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
         builder.setConfigureIntent(openAppIntent())
@@ -206,7 +212,10 @@ class ZeroVpnService : VpnService(), TunnelHost {
             ContextCompat.registerReceiver(
                 this,
                 receiver,
-                IntentFilter(Intent.ACTION_USER_PRESENT),
+                // USER_PRESENT alone misses phones with no keyguard (swipe or
+                // no lock) and some OEM builds that never send it; SCREEN_ON
+                // covers those. Both arriving is fine: the engine debounces.
+                IntentFilter(Intent.ACTION_USER_PRESENT).apply { addAction(Intent.ACTION_SCREEN_ON) },
                 ContextCompat.RECEIVER_NOT_EXPORTED,
             )
         }.onSuccess { unlockReceiver = receiver }

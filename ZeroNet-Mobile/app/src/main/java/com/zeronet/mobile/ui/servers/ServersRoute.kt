@@ -82,6 +82,7 @@ fun ServersRoute() {
         onTest = { controller.engine.test(listOf(it.key)) },
         onCopyLink = { controller.copy(it.link, sensitive = true) },
         onFavorite = { s, fav -> controller.servers.setFavorite(s.key, fav) },
+        onExcluded = { s, excluded -> controller.servers.setExcluded(s.key, excluded) },
         onDelete = {
             controller.servers.delete(listOf(it.key))
             detailKey = null

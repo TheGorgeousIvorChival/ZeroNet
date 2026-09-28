@@ -514,4 +514,9 @@
     <string name="logs_copy">Kopyala</string>
     <string name="logs_share">Paylaş</string>
     <string name="logs_clear">Temizle</string>
+    <string name="detail_auto_select">Otomatik seçimde kullan</string>
+    <string name="detail_auto_select_hint">Kapalı: otomatik bağlanma ve geçiş bu sunucuyu atlar. Dokunarak yine bağlanabilirsiniz.</string>
+    <string name="badge_skipped">Atlanıyor</string>
+    <string name="settings_speed_floor_adaptive">Uyarlanabilir</string>
+    <string name="settings_speed_floor_adaptive_hint">Hızınızı öğrenir ve son sunucularınızdan çok daha yavaş olanı bırakır</string>
 </resources>

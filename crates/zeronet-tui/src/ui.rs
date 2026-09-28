@@ -1174,6 +1174,10 @@ impl<'a> UiRenderer<'a> {
                 row_style = row_style
                     .fg(self.theme.accent_bright)
                     .add_modifier(Modifier::BOLD);
+            } else if cfg.excluded {
+                // Ruled out of auto-select: dimmed, but still legible and still
+                // manually connectable.
+                row_style = row_style.fg(self.theme.muted).add_modifier(Modifier::DIM);
             }
             // Selection is a filled row, not a star in the margin — it reads
             // at a glance from across the panel.
@@ -1259,6 +1263,13 @@ impl<'a> UiRenderer<'a> {
                     format!("{} · {}:{}", cfg.remark, cfg.address, cfg.port)
                 } else {
                     cfg.remark.clone()
+                };
+                // Excluded from automatic selection: a slashed-circle marker so
+                // the user can see the watchdog and finder will skip it.
+                let name = if cfg.excluded {
+                    format!("⊘ {name}")
+                } else {
+                    name
                 };
                 // Found by the finder: a public feed (◇) or others' reports (✦).
                 match cfg.origin.as_str() {

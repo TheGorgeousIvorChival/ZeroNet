@@ -195,8 +195,18 @@ object Engine {
     private const val SPEED_WINDOW = 20
     /** A one-second sample below this is not the user transferring anything. */
     private const val MIN_ACTIVE_BPS = 4_000L
+    /** Fronted variants of past public finds tested per search (matches the desktop finder). */
+    private const val FRONT_VARIANTS = 18
+    /** Shortest gap between two screen-on/unlock tunnel checks. */
+    private const val UNLOCK_CHECK_GAP_MS = 10_000L
+    /** Upload rate that counts as real use on its own (matches the desktop
+     *  watchdog's `UPLOAD_ALIVE_BPS`). */
+    private const val UPLOAD_ALIVE_BPS = 32L * 1024
     /** At least this many of the window's samples must be active to judge speed. */
     private const val ACTIVE_SAMPLES = 6
+    /** Active seconds out of [SPEED_WINDOW] before the adaptive floor treats
+     *  the window as a bulk transfer worth measuring. */
+    private const val SUSTAINED_SAMPLES = 10
     /** Silence this long, with connections still open, counts as a stall. */
     private const val STALL_AFTER_MS = 15_000L
     /** Past this, the silence is ordinary idleness, not a stalled download. */
@@ -244,6 +254,7 @@ object Engine {
     @Volatile private var lastBackgroundFindAt = 0L
     /** The unlock recovery is one-shot per unlock; this keeps two from stacking. */
     @Volatile private var unlockRecovery = false
+    @Volatile private var lastUnlockCheckAt = 0L
 
     /**
      * The kill switch's placeholder interface: an established VPN interface
@@ -274,6 +285,15 @@ object Engine {
     private var stallSeconds = 0
     /** Last time a server was dropped for being slow, so decisions don't flap. */
     private var lastSlowSwitchAt = 0L
+    /** Learns recent configs' delivered speeds for [SpeedFloor.Adaptive]. */
+    private val adaptiveFloor = AdaptiveFloor()
+    /** The primary whose speed [adaptiveFloor] is currently accumulating. */
+    private var adaptivePrimaryKey: String? = null
+    /** Best sustained throughput seen on the current primary, bytes/s. */
+    private var adaptivePeakBps = 0L
+    /** Seconds the current primary has been primary: the shared speed history
+     *  still holds the previous server's samples until a full window passes. */
+    private var adaptiveSeconds = 0
     /**
      * The user's own country (ISO-3166 alpha-2, upper case) from the cellular
      * network, or "" when unknown / on Wi-Fi. Cached per connection run and per
@@ -303,6 +323,9 @@ object Engine {
         app = context.applicationContext
         EngineLog.init(app)
         settings = readOptions() ?: settings
+        // Before the core builds a config: the rule sets must already be in
+        // place for the config to use them.
+        com.zeronet.mobile.data.GeoAssets.install(app)?.let { EngineLog.e("rule sets: $it") }
         nativeError = runCatching { ZrayNative.init(app.filesDir.absolutePath, coreLogLevel(settings)) }
             .fold({ it }, { "native library failed to load: ${it.message}" })
         if (nativeError != null) EngineLog.e("native init: $nativeError")
@@ -511,7 +534,8 @@ object Engine {
         when (val t = target) {
             is ConnectTarget.Subscription -> {
                 val all = withContext(Dispatchers.IO) { store.inSubscription(t.id) }
-                testAndCollect(all.filter { it.key !in excludeKeys }.ifEmpty { all }, network)
+                val usable = all.filter { !it.excluded }
+                testAndCollect(usable.filter { it.key !in excludeKeys }.ifEmpty { usable }, network)
             }
             else -> discover(network, excludeKeys)
         }
@@ -637,7 +661,8 @@ object Engine {
         val parsed = List(items.length()) { Server.fromLinkInfo(items.getJSONObject(it), Server.SOURCE_FEED_PREFIX + "crowd") }
         // A server already stored keeps its record: its source says whether it is the user's own.
         val stored = withContext(Dispatchers.IO) { store.byKeys(parsed.map { it.key }) }.associateBy { it.key }
-        val candidates = parsed.map { stored[it.key] ?: it }.distinctBy { it.key }.filter { suits(it, settings.profile) }
+        val candidates = parsed.map { stored[it.key] ?: it }.distinctBy { it.key }
+            .filter { suits(it, settings.profile) && !it.excluded }
         if (candidates.isEmpty()) return parsed.map { it.key }.toSet()
         val byKey = candidates.associateBy { it.key }
         EngineLog.i("trying ${candidates.size} known servers first: ${history.size} from this network's history, ${picks.size} from other users on $crowdName")
@@ -685,14 +710,55 @@ object Engine {
     private fun tunnelProxy(): java.net.Proxy? =
         if (running) java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", settings.httpPort)) else null
 
+    /**
+     * BPB-style fronting: the public servers that worked here before, re-aimed
+     * at a bounded sample of Cloudflare edge IPs, so one whose written address
+     * or port got blocked is still reached through an edge that is not.
+     *
+     * The user's own configs are never fronted. A fronted variant is a new
+     * link, found and reported like any public find, so fronting a personal
+     * worker would put its name into the crowd report.
+     */
+    private fun frontedVariants(history: List<String>, userServers: List<Server>): List<String> {
+        val own = userServers.mapTo(HashSet()) { it.link }
+        val public = history.filter { it !in own }
+        if (public.isEmpty()) return emptyList()
+        val request = JSONObject()
+            .put("links", JSONArray(public))
+            .put("seed", frontSeed())
+            .put("max", FRONT_VARIANTS)
+        return runCatching {
+            val answer = JSONObject(ZrayNative.frontLinks(request.toString()))
+            val links = answer.optJSONArray("links") ?: JSONArray()
+            List(links.length()) { links.getString(it) }
+        }.onFailure { EngineLog.w("fronting skipped: ${it.message}") }.getOrDefault(emptyList())
+    }
+
+    /**
+     * This install's fronting seed: fixed here, so probe evidence builds up
+     * against the same edges, but different between installs, so not every
+     * phone leans on the same few addresses. Local only, never sent anywhere.
+     */
+    private fun frontSeed(): Long {
+        val prefs = app.getSharedPreferences("fronting", android.content.Context.MODE_PRIVATE)
+        if (prefs.contains("seed")) return prefs.getLong("seed", 0L)
+        // Non-negative: the core reads it as an unsigned number.
+        val seed = java.security.SecureRandom().nextLong() and Long.MAX_VALUE
+        prefs.edit().putLong("seed", seed).apply()
+        return seed
+    }
+
     /** Stream discovery; bring the tunnel up on the first working config. */
     private suspend fun discover(network: String, excludeKeys: Set<String>) {
+        val history = withContext(Dispatchers.IO) { store.historyLinks(network, 12) }
+        val userServers = withContext(Dispatchers.IO) { store.userServers() }
         val request = JSONObject()
             .put("sources", Sources.toJson(Sources.enabled(settings.disabledSources)))
             .put("cache_dir", File(app.cacheDir, "feeds").apply { mkdirs() }.absolutePath)
-            .put("priority_links", JSONArray(withContext(Dispatchers.IO) { store.historyLinks(network, 12) }))
-            .put("extra_links", JSONArray(withContext(Dispatchers.IO) { store.userServers().map { it.link } }))
-            .put("exclude_keys", JSONArray(excludeKeys.toList()))
+            .put("priority_links", JSONArray(history + frontedVariants(history, userServers)))
+            .put("extra_links", JSONArray(userServers.filter { !it.excluded }.map { it.link }))
+            // Servers the user excluded are skipped even when a feed lists them again.
+            .put("exclude_keys", JSONArray((excludeKeys + withContext(Dispatchers.IO) { store.excludedKeys() }).toList()))
             .put("want_alive", wantAlive(settings.profile))
             .put("max_seconds", 75)
             .put("tcp_concurrency", 256).put("tcp_timeout_ms", 1500).put("tcp_stop_after_open", 1500)
@@ -836,7 +902,10 @@ object Engine {
         "\"${server.name.take(40)}\" (${server.protocol}/${server.transport}/${server.security}${if (server.country.isNotEmpty()) ", " + server.country else ""})"
 
     /** Test stored candidates (country / refresh) and bring up on the first alive one. */
-    private suspend fun testAndCollect(all: List<Server>, network: String) {
+    private suspend fun testAndCollect(servers: List<Server>, network: String) {
+        // A server the user excluded is never picked automatically, even from
+        // a chosen country or subscription.
+        val all = servers.filter { !it.excluded }
         // Prefer servers that suit the profile; if none of them do, any will.
         val candidates = all.filter { suits(it, settings.profile) }.ifEmpty { all }
         val byKey = candidates.associateBy { it.key }
@@ -1014,11 +1083,43 @@ object Engine {
     ) {
         if (!settings.autoSwitch || settings.profile == ConnectionProfile.Gaming) return
         if (target is ConnectTarget.Specific || !running || pool.size < 2) return
-        val floor = settings.speedFloorBytes
-        if (floor <= 0) return
         val now = System.currentTimeMillis()
-        val moving = downRate + upRate > MIN_ACTIVE_BPS
+        // Bytes coming back are the proof a tunnel works; outgoing bytes are
+        // counted before anything answers, so a dead tunnel that apps keep
+        // retrying still "uploads". Upload alone only counts at a real upload
+        // rate, otherwise a stalled connection never looks stalled.
+        val moving = downRate > MIN_ACTIVE_BPS || upRate >= UPLOAD_ALIVE_BPS
         if (moving) lastActiveAt = now
+
+        // Adaptive floor: remember the best *sustained* download speed each
+        // config reached, and judge the current one against what the recent
+        // ones delivered. Only a real bulk transfer is a measurement (see
+        // sustainedDownload): light browsing never fills the pipe, so its
+        // speed says nothing about the server. The per-config best is banked
+        // when the primary changes.
+        val adaptive = settings.speedFloor == SpeedFloor.Adaptive
+        val window = downHistory.toList().takeLast(SPEED_WINDOW)
+        var sustained: Long? = null
+        if (adaptive) {
+            val primaryKey = pool.firstOrNull()?.server?.key
+            if (primaryKey != adaptivePrimaryKey) {
+                if (adaptivePeakBps > 0) adaptiveFloor.record(adaptivePeakBps)
+                adaptivePrimaryKey = primaryKey
+                adaptivePeakBps = 0
+                adaptiveSeconds = 0
+            }
+            adaptiveSeconds++
+            // Only a window that belongs entirely to this server measures it.
+            if (adaptiveSeconds >= SPEED_WINDOW && window.size >= SPEED_WINDOW) {
+                sustained = sustainedDownload(window, MIN_ACTIVE_BPS, SUSTAINED_SAMPLES)
+            }
+            sustained?.let { adaptivePeakBps = maxOf(adaptivePeakBps, it) }
+        }
+        val floor = if (adaptive) adaptiveFloor.effectiveFloorBps() else settings.speedFloorBytes
+        // Off turns speed switching off entirely, stall checks included.
+        // Adaptive with no baseline yet still catches a stall, but never drops
+        // a server for being slow.
+        if (!adaptive && floor <= 0) return
 
         // Stall: connections are open, but nothing has moved for a while, and
         // the silence began while a real transfer was in progress.
@@ -1041,11 +1142,17 @@ object Engine {
 
         // Slow: the whole window of real transfer stayed under the floor.
         if (downHistory.size < SPEED_WINDOW) return
-        val window = downHistory.toList().takeLast(SPEED_WINDOW)
-        val active = window.count { it > MIN_ACTIVE_BPS } >= ACTIVE_SAMPLES
-        val peak = window.maxOrNull() ?: 0L
-        val avg = window.sum() / window.size
-        if (active && peak < floor && avg < floor && now - lastSlowSwitchAt > SLOW_COOLDOWN_MS) {
+        val slow = if (adaptive) {
+            // Like against like: this config's sustained speed next to the
+            // sustained speeds recent configs reached.
+            sustained != null && adaptiveFloor.tooSlow(sustained)
+        } else {
+            val active = window.count { it > MIN_ACTIVE_BPS } >= ACTIVE_SAMPLES
+            val peak = window.maxOrNull() ?: 0L
+            val avg = window.sum() / window.size
+            active && peak < floor && avg < floor
+        }
+        if (slow && now - lastSlowSwitchAt > SLOW_COOLDOWN_MS) {
             dropPrimary("slow")
         }
     }
@@ -1174,6 +1281,10 @@ object Engine {
      */
     fun onUnlocked() {
         if (!running || unlockRecovery) return
+        // Screen-on and unlock usually arrive together; one check covers both.
+        val now = System.currentTimeMillis()
+        if (now - lastUnlockCheckAt < UNLOCK_CHECK_GAP_MS) return
+        lastUnlockCheckAt = now
         unlockRecovery = true
         scope.launch {
             try {
@@ -1628,4 +1739,71 @@ object Engine {
         runCatching { com.zeronet.mobile.data.SettingsStore.readSnapshot(app) }.getOrNull()
 
     fun snapshotSettings(): Settings = readOptions() ?: settings
+}
+
+/**
+ * The adaptive speed floor for [SpeedFloor.Adaptive]: learn what the user's
+ * connection actually delivers and judge the config in use against that,
+ * instead of a fixed Mbps that is wrong on both a throttled mobile network and
+ * on fibre. Mirrors the Rust reference in `zeronet-tui/src/adaptive_speed.rs`
+ * (kept identical so both clients behave the same); see its tests for the
+ * rationale of each constant.
+ */
+internal class AdaptiveFloor {
+    private val recent = ArrayDeque<Long>()
+
+    /** Record the best sustained speed (bytes/s) a config reached before it was
+     *  left. Near-zero samples say nothing about the network and are ignored. */
+    fun record(sustainedBps: Long) {
+        if (sustainedBps < MIN_BASELINE_BPS) return
+        if (recent.size == HISTORY) recent.removeFirst()
+        recent.addLast(sustainedBps)
+    }
+
+    /** The learned baseline: the median of recent speeds, once at least two
+     *  configs have been seen (one is not a comparison). */
+    fun baseline(): Long? {
+        if (recent.size < 2) return null
+        val sorted = recent.sorted()
+        val mid = sorted.size / 2
+        return if (sorted.size % 2 == 0) (sorted[mid - 1] + sorted[mid]) / 2 else sorted[mid]
+    }
+
+    /** The floor to compare live throughput against, bytes/s. 0 = do not judge
+     *  (too little history, or a network slow enough that everything is near
+     *  the baseline anyway). */
+    fun effectiveFloorBps(): Long {
+        val base = baseline() ?: return 0L
+        return if (base >= MIN_BASELINE_BPS) base * SLOW_NUMERATOR / SLOW_DENOMINATOR else 0L
+    }
+
+    /** Whether [currentBps] is really slow next to the last two configs: under
+     *  the adaptive floor *and* slower than each of the previous two, so one
+     *  lucky fast reading does not condemn a config on its own. */
+    fun tooSlow(currentBps: Long): Boolean {
+        val floor = effectiveFloorBps()
+        if (floor == 0L || currentBps >= floor) return false
+        val n = recent.size
+        return currentBps < recent[n - 1] && currentBps < recent[n - 2]
+    }
+
+    private companion object {
+        const val HISTORY = 5
+        const val SLOW_NUMERATOR = 2L
+        const val SLOW_DENOMINATOR = 5L
+        const val MIN_BASELINE_BPS = 8_000L
+    }
+}
+
+/**
+ * The sustained download speed of a window of one-second samples, or null when
+ * the window was not a bulk transfer: fewer than [minActive] seconds moved real
+ * data. The median of the active seconds, so one burst neither makes a config
+ * look fast nor a pause make it look slow.
+ */
+internal fun sustainedDownload(window: List<Long>, minActiveBps: Long = 4_000L, minActive: Int = 10): Long? {
+    val active = window.filter { it > minActiveBps }.sorted()
+    if (active.size < minActive) return null
+    val mid = active.size / 2
+    return if (active.size % 2 == 0) (active[mid - 1] + active[mid]) / 2 else active[mid]
 }

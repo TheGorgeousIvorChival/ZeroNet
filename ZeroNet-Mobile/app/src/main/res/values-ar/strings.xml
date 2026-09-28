@@ -534,4 +534,9 @@
     <string name="logs_copy">نسخ</string>
     <string name="logs_share">مشاركة</string>
     <string name="logs_clear">مسح</string>
+    <string name="detail_auto_select">استخدامه في الاختيار التلقائي</string>
+    <string name="detail_auto_select_hint">عند الإيقاف: يتجاوز الاتصال والتبديل التلقائي هذا الخادم. ما زال بإمكانك النقر عليه للاتصال.</string>
+    <string name="badge_skipped">مستبعد</string>
+    <string name="settings_speed_floor_adaptive">تكيفي</string>
+    <string name="settings_speed_floor_adaptive_hint">يتعلم سرعتك ويترك الخادم الأبطأ كثيرًا من خوادمك الأخيرة</string>
 </resources>

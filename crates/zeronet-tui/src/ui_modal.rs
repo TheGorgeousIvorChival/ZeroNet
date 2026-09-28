@@ -1104,21 +1104,24 @@ impl UiRenderer<'_> {
             rows[0],
         );
 
-        // A bordered panel of nothing but the link. No cursor, no decoration
-        // inside the text — drag-select in the terminal picks up exactly the
-        // link and nothing else.
+        // A bordered panel of nothing but the link. Its parts are coloured —
+        // scheme, credential, host, port, each query key/value and the #name —
+        // but the styling is colour only: the spans concatenate back to the
+        // exact link, so a terminal drag-select still picks up the link and
+        // nothing else.
         frame.render_widget(
-            Paragraph::new(uri)
-                .wrap(Wrap { trim: false })
-                .style(Style::default().fg(self.theme.text))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(self.theme.border))
-                        .title(" share link ")
-                        .title_style(Style::default().fg(self.theme.muted)),
-                ),
+            Paragraph::new(ratatui::text::Line::from(crate::linkcolor::highlight_link(
+                uri, self.theme,
+            )))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(self.theme.border))
+                    .title(" share link ")
+                    .title_style(Style::default().fg(self.theme.muted)),
+            ),
             rows[1],
         );
 

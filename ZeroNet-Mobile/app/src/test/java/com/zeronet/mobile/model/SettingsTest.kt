@@ -33,6 +33,7 @@ class SettingsTest {
             antiSanctionDns = AntiSanctionDns.Electro,
             customAntiSanction = "10.202.10.10",
             fragmentPackets = "1-1",
+            speedFloor = SpeedFloor.Adaptive,
             fakeDns = false,
             blockAds = false,
             themeMode = ThemeMode.Dark,

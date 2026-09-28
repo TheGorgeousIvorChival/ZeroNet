@@ -35,6 +35,9 @@ class QuickTileService : TileService() {
         scope = null
     }
 
+    // The deprecated Intent overload is only called below API 34, where the
+    // PendingIntent one does not exist.
+    @android.annotation.SuppressLint("StartActivityAndCollapseDeprecated")
     override fun onClick() {
         if (Engine.state.value.isActive) {
             Engine.disconnect()
@@ -47,6 +50,7 @@ class QuickTileService : TileService() {
             if (Build.VERSION.SDK_INT >= 34) {
                 startActivityAndCollapse(PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE))
             } else {
+                // The PendingIntent overload only exists from API 34, handled above.
                 @Suppress("DEPRECATION")
                 startActivityAndCollapse(intent)
             }

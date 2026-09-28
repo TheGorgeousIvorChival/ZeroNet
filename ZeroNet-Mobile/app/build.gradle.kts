@@ -53,6 +53,13 @@ android {
         vectorDrawables { useSupportLibrary = false }
     }
 
+    // Only the languages the app is translated into (res/xml/locales_config.xml).
+    // AndroidX and Material otherwise ship their strings in ~90 locales that
+    // the UI never shows, which costs download size and nothing else.
+    androidResources {
+        localeFilters += listOf("en", "fa", "az", "ckb", "ar", "ru", "tr", "zh-rCN")
+    }
+
     splits {
         abi {
             isEnable = true

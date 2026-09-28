@@ -25,6 +25,9 @@ const WANT_ALIVE: usize = 3;
 const MAX_SWITCHES: u32 = 4;
 /// `settings` keys outside `AppSettings`.
 const CROWD_NET_KEY: &str = "crowd_net";
+/// This install's fronting seed (see [`FinderRequest::front_seed`]). Local
+/// only: it is never sent anywhere.
+const FRONT_SEED_KEY: &str = "front_seed";
 const NONCE_KEY: &str = "crowd_nonce";
 const NONCE_DAY_KEY: &str = "crowd_nonce_day";
 
@@ -93,6 +96,20 @@ impl App<'_> {
 
     /// Start a search; `connect` dials the first server found unless a
     /// connection is already up or on its way.
+    /// This install's fronting seed, drawn once and then kept.
+    fn front_seed(&self) -> u64 {
+        if let Some(seed) = self
+            .db
+            .get_value(FRONT_SEED_KEY)
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            return seed;
+        }
+        let seed: u64 = rand::random();
+        let _ = self.db.set_value(FRONT_SEED_KEY, &seed.to_string());
+        seed
+    }
+
     pub(crate) fn start_finder(&mut self, connect: bool) {
         if let Some(session) = &mut self.finder.session {
             // Asking again while a search runs only upgrades it to connect.
@@ -120,6 +137,7 @@ impl App<'_> {
                 .filter(|net| zero_discovery::crowd::valid_net(net))
                 .unwrap_or_else(|| zero_discovery::crowd::ALL_NETS.into()),
             use_crowd: true,
+            front_seed: self.front_seed(),
         };
         let cancel = zero_discovery::CancellationToken::new();
         let tx = self.finder.tx.clone();
@@ -188,7 +206,11 @@ impl App<'_> {
                     .as_ref()
                     .map_or((false, false), |s| (s.connect, s.replace));
                 let online = self.connection.wants_connection();
-                if connect && (!online || replace) {
+                // A find that maps onto a profile the user excluded is kept as a
+                // backup but never auto-dialled; the search stays armed so the
+                // next non-excluded find is the one connected to.
+                let excluded = self.config_by_id(id).is_some_and(|c| c.excluded);
+                if connect && (!online || replace) && !excluded {
                     if let Some(session) = &mut self.finder.session {
                         // Only the first find is dialled; the rest are backups.
                         session.connect = false;
@@ -299,7 +321,7 @@ impl App<'_> {
                             *candidate != id
                                 && self
                                     .config_by_id(*candidate)
-                                    .is_some_and(|c| c.ping_ms.is_some())
+                                    .is_some_and(|c| c.ping_ms.is_some() && !c.excluded)
                         });
                 match next {
                     Some(next) if self.finder.switches <= MAX_SWITCHES => {
