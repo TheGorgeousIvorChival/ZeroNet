@@ -44,6 +44,7 @@ class ServerStore private constructor(context: Context) :
                 country TEXT NOT NULL,
                 source TEXT NOT NULL,
                 favorite INTEGER NOT NULL DEFAULT 0,
+                excluded INTEGER NOT NULL DEFAULT 0,
                 delay_ms INTEGER NOT NULL DEFAULT -1,
                 tested_at INTEGER NOT NULL DEFAULT 0,
                 alive_count INTEGER NOT NULL DEFAULT 0,
@@ -79,6 +80,7 @@ class ServerStore private constructor(context: Context) :
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         // Step by step, so any older version reaches the current one.
         if (oldVersion < 2) db.execSQL("ALTER TABLE servers ADD COLUMN last_error TEXT")
+        if (oldVersion < 3) db.execSQL("ALTER TABLE servers ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
     }
 
     // ------------------------------------------------------------------ reads
@@ -111,8 +113,9 @@ class ServerStore private constructor(context: Context) :
     fun historyLinks(network: String, limit: Int): List<String> {
         val out = ArrayList<String>(limit)
         readableDatabase.rawQuery(
+            // Excluded servers are ruled out of automatic selection.
             """SELECT s.link FROM history h JOIN servers s ON s.key = h.key
-               WHERE h.network = ? ORDER BY h.score DESC, h.last_ok DESC LIMIT ?""",
+               WHERE h.network = ? AND s.excluded = 0 ORDER BY h.score DESC, h.last_ok DESC LIMIT ?""",
             arrayOf(network, limit.toString()),
         ).use { c -> while (c.moveToNext()) out += c.getString(0) }
         return out
@@ -212,6 +215,19 @@ class ServerStore private constructor(context: Context) :
         writableDatabase.execSQL("UPDATE servers SET favorite = ? WHERE key = ?", arrayOf<Any>(if (favorite) 1 else 0, key))
     }
 
+    /** Keys of the servers the user ruled out of automatic selection. */
+    fun excludedKeys(): Set<String> {
+        val out = HashSet<String>()
+        readableDatabase.rawQuery("SELECT key FROM servers WHERE excluded != 0", null)
+            .use { c -> while (c.moveToNext()) out += c.getString(0) }
+        return out
+    }
+
+    /** Rule a server in or out of automatic selection without deleting it. */
+    fun setExcluded(key: String, excluded: Boolean) {
+        writableDatabase.execSQL("UPDATE servers SET excluded = ? WHERE key = ?", arrayOf<Any>(if (excluded) 1 else 0, key))
+    }
+
     fun delete(keys: Collection<String>) {
         if (keys.isEmpty()) return
         val db = writableDatabase
@@ -290,6 +306,7 @@ class ServerStore private constructor(context: Context) :
         val country = c.getColumnIndexOrThrow("country")
         val source = c.getColumnIndexOrThrow("source")
         val favorite = c.getColumnIndexOrThrow("favorite")
+        val excluded = c.getColumnIndexOrThrow("excluded")
         val delay = c.getColumnIndexOrThrow("delay_ms")
         val tested = c.getColumnIndexOrThrow("tested_at")
         val alive = c.getColumnIndexOrThrow("alive_count")
@@ -302,13 +319,14 @@ class ServerStore private constructor(context: Context) :
             host = c.getString(host), port = c.getInt(port), country = c.getString(country), source = c.getString(source),
             favorite = c.getInt(favorite) != 0, delayMs = c.getInt(delay), lastTestedAt = c.getLong(tested),
             aliveCount = c.getInt(alive), failCount = c.getInt(fail),
+            excluded = c.getInt(excluded) != 0,
             lastError = if (c.isNull(error)) null else c.getString(error),
         )
     }
 
     companion object {
         private const val DB_NAME = "servers.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
         const val MAX_DISCOVERED = 2000
 
         /** Faster answers earn more; any success earns at least 1. */

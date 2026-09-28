@@ -60,6 +60,14 @@ class ServerRepository private constructor(context: Context) {
         }
     }
 
+    /** Rule a server out of (or back into) automatic selection without deleting it. */
+    fun setExcluded(key: String, excluded: Boolean) {
+        scope.launch {
+            store.setExcluded(key, excluded)
+            _servers.value = store.all()
+        }
+    }
+
     fun delete(keys: Collection<String>) {
         scope.launch {
             store.delete(keys)

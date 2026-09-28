@@ -250,6 +250,8 @@
     <string name="settings_speed_floor_low_hint">Move off a server under 1 Mbps</string>
     <string name="settings_speed_floor_medium_hint">Move off a server under 3 Mbps</string>
     <string name="settings_speed_floor_custom_hint">Speed in kbps</string>
+    <string name="settings_speed_floor_adaptive_hint">Learns your speed and drops a server that is much slower than your recent ones</string>
+    <string name="settings_speed_floor_adaptive">Adaptive</string>
     <string name="settings_speed_floor_low">1 Mbps</string>
     <string name="settings_speed_floor_medium">3 Mbps</string>
     <string name="settings_speed_floor_custom">Custom</string>
@@ -516,4 +518,7 @@
     <string name="logs_copy">Copy</string>
     <string name="logs_share">Share</string>
     <string name="logs_clear">Clear</string>
+    <string name="detail_auto_select">Use for automatic picks</string>
+    <string name="detail_auto_select_hint">Off: auto-connect and switching skip this server. You can still tap it to connect.</string>
+    <string name="badge_skipped">Skipped</string>
 </resources>

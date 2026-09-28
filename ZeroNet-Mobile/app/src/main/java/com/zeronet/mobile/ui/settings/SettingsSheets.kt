@@ -189,10 +189,11 @@ fun ConnectionMoreSheet(visible: Boolean, s: Settings, reconnect: Boolean, actio
 private fun TrustedNetworks(s: Settings, actions: SettingsActions) {
     val c = ZeroTheme.colors
     val context = LocalContext.current
-    val current by produceState<Pair<String, String>?>(null) {
+    val unknownNetwork = stringResource(R.string.trusted_unknown_network)
+    val current by produceState<Pair<String, String>?>(null, unknownNetwork) {
         value = withContext(Dispatchers.IO) {
             com.zeronet.mobile.data.NetworkIdentity.current(context)?.let { id ->
-                id to com.zeronet.mobile.data.NetworkIdentity.label(context).ifBlank { context.getString(R.string.trusted_unknown_network) }
+                id to com.zeronet.mobile.data.NetworkIdentity.label(context).ifBlank { unknownNetwork }
             }
         }
     }

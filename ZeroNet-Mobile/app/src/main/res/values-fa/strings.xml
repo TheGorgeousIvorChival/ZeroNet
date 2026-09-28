@@ -514,4 +514,9 @@
     <string name="logs_copy">کپی</string>
     <string name="logs_share">اشتراک</string>
     <string name="logs_clear">پاک کردن</string>
+    <string name="detail_auto_select">استفاده در انتخاب خودکار</string>
+    <string name="detail_auto_select_hint">خاموش: اتصال و جابه‌جایی خودکار از این سرور رد می‌شود. هنوز می‌توانید با زدن روی آن وصل شوید.</string>
+    <string name="badge_skipped">کنار گذاشته</string>
+    <string name="settings_speed_floor_adaptive">تطبیقی</string>
+    <string name="settings_speed_floor_adaptive_hint">سرعت شما را یاد می‌گیرد و سروری را که خیلی کندتر از سرورهای اخیر است کنار می‌گذارد</string>
 </resources>

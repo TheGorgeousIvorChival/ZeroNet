@@ -515,4 +515,9 @@
     <string name="logs_copy">Kopyala</string>
     <string name="logs_share">Paylaş</string>
     <string name="logs_clear">Təmizlə</string>
+    <string name="detail_auto_select">Avtomatik seçimdə istifadə et</string>
+    <string name="detail_auto_select_hint">Söndürülüb: avtomatik qoşulma və keçid bu serveri ötür. Toxunaraq yenə qoşula bilərsiniz.</string>
+    <string name="badge_skipped">Ötürülür</string>
+    <string name="settings_speed_floor_adaptive">Uyğunlaşan</string>
+    <string name="settings_speed_floor_adaptive_hint">Sürətinizi öyrənir və son serverlərinizdən xeyli yavaş olanı buraxır</string>
 </resources>

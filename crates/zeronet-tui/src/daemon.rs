@@ -109,6 +109,10 @@ pub struct EngineOptions {
     pub mux_concurrency: u16,
     /// Split the ClientHello across packets.
     pub fragment_enabled: bool,
+    /// Inject a decoy allow-listed SNI on TLS/REALITY outbounds (raw fake-SNI
+    /// desync). Needs `CAP_NET_RAW`; without it the engine skips the decoy
+    /// and the connection goes out unchanged.
+    pub sni_spoof: bool,
     /// Bytes per fragment. Clamped into a range the engine accepts at the
     /// boundary; see [`EngineOptions::fragment_length_range`].
     pub tls_fragment_size: u16,
@@ -154,6 +158,7 @@ impl Default for EngineOptions {
             mux_concurrency: 8,
             fragment_enabled: false,
             tls_fragment_size: 150,
+            sni_spoof: false,
             keepalive_interval_secs: 30,
             tcp_congestion: String::new(),
             custom_dns: String::new(),
@@ -1018,6 +1023,30 @@ fn apply_engine_options(config: &mut serde_json::Value, options: &EngineOptions)
         }
     }
 
+    // ---- IPv6 off under TUN: captured, then dropped (never leaked)
+    if options.tun_mode && !options.ipv6_enabled {
+        let tun_tags: Vec<String> = map
+            .get("inbounds")
+            .and_then(|i| i.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|i| i.get("protocol").and_then(|p| p.as_str()) == Some("tun"))
+            .filter_map(|i| i.get("tag").and_then(|t| t.as_str()).map(str::to_string))
+            .collect();
+        for tag in tun_tags {
+            block_tun_ipv6(map, &tag);
+        }
+        // And stop handing out AAAA answers: an app given a v6 address tries
+        // it first, and the drop above would only cost it a fallback wait.
+        if let Some(dns) = map
+            .entry("dns")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+        {
+            dns.insert("queryStrategy".into(), serde_json::json!("UseIPv4"));
+        }
+    }
+
     // ---- dns and observatory
     apply_custom_dns(map, options);
     apply_clean_ip(map, options);
@@ -1103,11 +1132,15 @@ fn apply_fingerprint(outbound: &mut serde_json::Value, options: &EngineOptions) 
         let effective = if !configured.is_empty() {
             configured
         } else if link_declares_reality(link) {
-            // A REALITY profile without a shape cannot carry its auth tag; the
-            // link parser already reads a missing `fp=` as this same default,
-            // so stamping it here changes nothing for a correct link and keeps
-            // a REALITY-without-fingerprint link from failing at compile time.
-            REALITY_DEFAULT_FINGERPRINT
+            // A REALITY profile without a shape cannot carry its auth tag; a
+            // link with no `fp=`, or one REALITY cannot use, gets the default
+            // (the same one the link parser reads a missing `fp=` as). An
+            // explicit shape the user chose that REALITY *can* use is left as
+            // it is, rather than silently rewritten to chrome.
+            match link_fingerprint(link) {
+                Some(fp) if reality_usable_fingerprint(fp) => return,
+                _ => REALITY_DEFAULT_FINGERPRINT,
+            }
         } else {
             return;
         };
@@ -1129,7 +1162,19 @@ fn apply_fingerprint(outbound: &mut serde_json::Value, options: &EngineOptions) 
     };
     let effective = match (configured.is_empty(), block) {
         (false, _) => configured,
-        (true, "realitySettings") => REALITY_DEFAULT_FINGERPRINT,
+        (true, "realitySettings") => {
+            // Keep a REALITY-usable shape the profile already carries; only a
+            // missing or unusable one is replaced with the default, so an
+            // explicit choice like firefox is not overwritten with chrome.
+            let existing = stream
+                .get("realitySettings")
+                .and_then(|s| s.get("fingerprint"))
+                .and_then(|f| f.as_str());
+            match existing {
+                Some(fp) if reality_usable_fingerprint(fp) => return,
+                _ => REALITY_DEFAULT_FINGERPRINT,
+            }
+        }
         // Plain TLS works unshaped, and a profile that never set one is not
         // given a shape it did not ask for.
         (true, _) => return,
@@ -1159,6 +1204,25 @@ fn link_declares_reality(link: &str) -> bool {
     query.split('&').any(|pair| pair == "security=reality")
 }
 
+/// The `fp=` value a share link carries, if any.
+fn link_fingerprint(link: &str) -> Option<&str> {
+    let (_, rest) = link.split_once('?')?;
+    let query = rest.split('#').next().unwrap_or(rest);
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == "fp")
+        .map(|(_, value)| value)
+        .filter(|value| !value.is_empty())
+}
+
+/// Whether a fingerprint name is one REALITY can actually use: it parses and
+/// carries the X25519 key share REALITY's authentication derives from. An
+/// unusable one (empty, `unsafe`, `android`, …) is treated as no shape at all.
+fn reality_usable_fingerprint(name: &str) -> bool {
+    zero_config::Fingerprint::parse(name).is_some_and(|fp| fp.supports_reality())
+}
+
 /// Stamp the evasion knobs onto one outbound.
 ///
 /// Two shapes again, and the split matters twice over: a share link cannot
@@ -1177,6 +1241,11 @@ fn apply_evasion(outbound: &mut serde_json::Value, options: &EngineOptions) {
     // something on a TLS-bearing outbound without ECH — ECH encrypts the SNI
     // and there is no plaintext name left to split.
     let want_fragment = options.fragment_enabled && outbound_shreds_well(outbound);
+    // SNI spoofing rides any TLS/REALITY carrier — unlike fragmentation it adds
+    // a separate decoy packet and never splits the real hello, so REALITY is
+    // fine. Only the link form is stamped here (what the TUI stores); the
+    // link-evasion parser turns `sniSpoof` into the runtime desync.
+    let want_spoof = options.sni_spoof && outbound_can_sni_spoof(outbound);
 
     if outbound.get("link").and_then(|l| l.as_str()).is_some() {
         let Some(object) = outbound.as_object_mut() else {
@@ -1193,6 +1262,14 @@ fn apply_evasion(outbound: &mut serde_json::Value, options: &EngineOptions) {
             evasion.insert("fragment".into(), fragment_overlay(options));
         } else {
             evasion.remove("fragment");
+        }
+        if want_spoof {
+            evasion.insert(
+                "sniSpoof".into(),
+                serde_json::json!({ "fakeSni": SNI_SPOOF_DECOY }),
+            );
+        } else {
+            evasion.remove("sniSpoof");
         }
         match keepalive {
             Some((idle, lifetime)) => {
@@ -1284,6 +1361,32 @@ fn keepalive_mask(idle: u64, lifetime: u64) -> serde_json::Value {
         "settings": keepalive_overlay(idle, lifetime),
     })
 }
+
+/// Whether raw fake-SNI injection applies to this outbound: it needs a TCP
+/// TLS or REALITY ClientHello to hide behind. REALITY is allowed (the decoy is
+/// a separate packet), but plaintext and QUIC carriers are not.
+fn outbound_can_sni_spoof(outbound: &serde_json::Value) -> bool {
+    if let Some(link) = outbound.get("link").and_then(|l| l.as_str()) {
+        return match zero_config::parse_link(link) {
+            Ok(parsed) => matches!(
+                parsed.outbound.stream.security,
+                zero_config::Security::Tls(_) | zero_config::Security::Reality(_)
+            ),
+            Err(_) => false,
+        };
+    }
+    matches!(
+        outbound
+            .get("streamSettings")
+            .and_then(|s| s.get("security"))
+            .and_then(|s| s.as_str()),
+        Some("tls") | Some("reality") | Some("xtls")
+    )
+}
+
+/// The decoy SNI stamped into a spoofed ClientHello: a widely-allow-listed
+/// name a DPI parser reads instead of the real destination.
+const SNI_SPOOF_DECOY: &str = "www.microsoft.com";
 
 /// Whether ClientHello fragmentation would do anything for this outbound.
 ///
@@ -1528,14 +1631,55 @@ fn retune_tun_inbound(inbound: &mut serde_json::Value, options: &EngineOptions) 
         "strictRoute".into(),
         serde_json::json!(options.strict_route_effective()),
     );
-    // A v6 default route on a machine with no working v6 path black-holes
-    // every AAAA connection, so the halves are installed independently.
-    let mut routes = vec!["0.0.0.0/1", "128.0.0.0/1"];
-    if options.ipv6_enabled {
-        routes.push("::/1");
-        routes.push("8000::/1");
+    // IPv6 is always captured, as two halves so the tunnel does not outrank a
+    // more specific route the system already has. Leaving v6 uncaptured when
+    // it is switched off was a leak: on a dual-stack network every app that
+    // prefers v6 (browsers do) went straight out the real interface. With v6
+    // off the captured traffic is dropped by a routing rule instead, so an
+    // app falls back to v4 through the tunnel.
+    settings.insert(
+        "routes".into(),
+        serde_json::json!(["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]),
+    );
+    if let Some(addresses) = settings
+        .entry("addresses")
+        .or_insert_with(|| serde_json::json!([TUN_V4_ADDRESS]))
+        .as_array_mut()
+    {
+        let has_v6 = addresses
+            .iter()
+            .any(|a| a.as_str().is_some_and(|a| a.contains(':')));
+        if !has_v6 {
+            addresses.push(serde_json::json!(TUN_V6_ADDRESS));
+        }
     }
-    settings.insert("routes".into(), serde_json::json!(routes));
+}
+
+const TUN_V4_ADDRESS: &str = "10.254.0.1/30";
+const TUN_V6_ADDRESS: &str = "fdfe:dcba:9876::1/126";
+
+/// With IPv6 off, drop the v6 traffic the TUN captures rather than let it
+/// reach an outbound. Only destinations that are v6 addresses match (a
+/// v4-mapped address is judged as v4), so v4 is untouched.
+fn block_tun_ipv6(config: &mut serde_json::Map<String, serde_json::Value>, tun_tag: &str) {
+    let Some(routing) = config.get_mut("routing").and_then(|r| r.as_object_mut()) else {
+        return;
+    };
+    let rules = routing
+        .entry("rules")
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(rules) = rules.as_array_mut() else {
+        return;
+    };
+    let rule = serde_json::json!({
+        "type": "field",
+        "inboundTag": [tun_tag],
+        "ip": ["::/0"],
+        "outboundTag": "block",
+    });
+    if !rules.contains(&rule) {
+        rules.insert(0, rule);
+    }
 }
 
 fn has_tag(arr: &[serde_json::Value], tag: &str) -> bool {
@@ -1550,10 +1694,9 @@ fn ensure_tun_inbound(inbounds: &mut Vec<serde_json::Value>, options: &EngineOpt
     {
         return;
     }
-    let mut addresses = vec!["10.254.0.1/30".to_string()];
-    if options.ipv6_enabled {
-        addresses.push("fdfe:dcba:9876::1/126".to_string());
-    }
+    // Both families always: see `retune_tun_inbound` for why v6 is captured
+    // even when it is switched off.
+    let addresses = vec![TUN_V4_ADDRESS.to_string(), TUN_V6_ADDRESS.to_string()];
     inbounds.push(serde_json::json!({
         "tag": "tun-in",
         "protocol": "tun",
@@ -1763,6 +1906,7 @@ mod tests {
             mux_enabled: true,
             mux_concurrency: 24,
             fragment_enabled: true,
+            sni_spoof: true,
             tls_fragment_size: 300,
             keepalive_interval_secs: 75,
             tcp_congestion: "cubic".into(),
@@ -1834,9 +1978,17 @@ mod tests {
             .iter()
             .filter_map(|r| r.as_str())
             .collect();
+        // IPv6 off still captures v6 (so it cannot leak) and drops it.
         assert!(
-            !routes.iter().any(|r| r.contains(':')),
-            "IPv6 is off but v6 routes were installed: {routes:?}"
+            routes.contains(&"::/1") && routes.contains(&"8000::/1"),
+            "IPv6 is off but v6 is not captured, so it would leak: {routes:?}"
+        );
+        assert!(
+            v["routing"]["rules"].as_array().is_some_and(|rules| rules
+                .iter()
+                .any(|r| r["ip"] == serde_json::json!(["::/0"]) && r["outboundTag"] == "block")),
+            "IPv6 is off but captured v6 is not dropped: {}",
+            v["routing"]
         );
 
         let proxy = proxy_outbound(&v);
@@ -2095,6 +2247,30 @@ mod tests {
             proxy["evasion"].get("fragment").is_none(),
             "a REALITY outbound was given ClientHello fragmentation: {proxy}"
         );
+    }
+
+    #[test]
+    fn sni_spoof_stamps_a_decoy_on_a_reality_link_and_still_compiles() {
+        let opts = EngineOptions {
+            sni_spoof: true,
+            ..EngineOptions::default()
+        };
+        let json = prepare_runnable_config_with(LINK, &opts).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let proxy = v["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o.get("link").is_some())
+            .expect("a link outbound");
+        assert_eq!(
+            proxy["evasion"]["sniSpoof"]["fakeSni"].as_str(),
+            Some(SNI_SPOOF_DECOY),
+            "the SNI decoy did not reach the REALITY link: {proxy}"
+        );
+        // Compiles + validates: REALITY accepts the decoy (a separate packet),
+        // unlike fragmentation which it rejects.
+        assert_eq!(validate_profile(LINK, &opts), Ok(()));
     }
 
     #[test]
@@ -2391,6 +2567,57 @@ mod tests {
         // more specific route the system already has.
         assert!(routes.contains(&"::/1".to_string()), "{routes:?}");
         assert!(routes.contains(&"8000::/1".to_string()), "{routes:?}");
+    }
+
+    #[test]
+    fn ipv6_off_under_tun_is_captured_and_dropped_not_leaked() {
+        let opts = EngineOptions {
+            tun_mode: true,
+            ipv6_enabled: false,
+            ..EngineOptions::default()
+        };
+        let json = prepare_runnable_config_with(LINK, &opts).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let tun = inbound_named(&v, "tun");
+        let routes: Vec<&str> = tun["settings"]["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.as_str())
+            .collect();
+        // Captured even though it is off: an uncaptured v6 goes out the real
+        // interface on a dual-stack network.
+        assert!(
+            routes.contains(&"::/1") && routes.contains(&"8000::/1"),
+            "{routes:?}"
+        );
+        let addresses = tun["settings"]["addresses"].as_array().unwrap();
+        assert!(
+            addresses
+                .iter()
+                .any(|a| a.as_str().is_some_and(|a| a.contains(':'))),
+            "the TUN needs a v6 address to take v6 routes: {addresses:?}"
+        );
+        // …and then dropped, first, before any other rule can send it on.
+        let first = &v["routing"]["rules"][0];
+        assert_eq!(first["ip"], serde_json::json!(["::/0"]), "{first}");
+        assert_eq!(first["outboundTag"], "block");
+        assert_eq!(
+            v["dns"]["queryStrategy"], "UseIPv4",
+            "AAAA answers would send apps to v6 first"
+        );
+        assert_eq!(validate_profile(LINK, &opts), Ok(()));
+    }
+
+    #[test]
+    fn ipv6_on_under_tun_is_not_blocked() {
+        let opts = EngineOptions {
+            tun_mode: true,
+            ipv6_enabled: true,
+            ..EngineOptions::default()
+        };
+        let json = prepare_runnable_config_with(LINK, &opts).unwrap();
+        assert!(!json.contains("\"::/0\""), "v6 must not be blocked when on");
     }
 
     #[test]

@@ -29,6 +29,9 @@ enum class SpeedFloor(val mbps: Int) {
     Off(0),
     Low(1),
     Medium(3),
+    /** Learns the user's recently achieved speeds and drops a config that is
+     *  really slow next to them; the floor is computed live, not fixed. */
+    Adaptive(-2),
     Custom(-1),
 }
 
@@ -137,6 +140,9 @@ data class Settings(
         get() = when (speedFloor) {
             SpeedFloor.Off -> 0L
             SpeedFloor.Low, SpeedFloor.Medium -> speedFloor.mbps * 1_000_000L / 8
+            // Adaptive computes its floor live from recent speeds (Engine's
+            // AdaptiveFloor); there is no static value to report here.
+            SpeedFloor.Adaptive -> 0L
             SpeedFloor.Custom -> speedFloorKbps.coerceIn(0, 1_000_000).toLong() * 1_000L / 8
         }
 

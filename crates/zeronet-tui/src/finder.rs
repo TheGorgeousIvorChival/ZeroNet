@@ -33,6 +33,17 @@ pub const CROWD_PICKS: usize = 12;
 /// Found servers from earlier searches tested before searching.
 pub const HISTORY_LINKS: usize = 12;
 
+/// Cloudflare-fronted variants of the user's own history links to also test in
+/// the known stage. A CDN-fronted config answers on many edge IPs and alternate
+/// HTTPS ports, and the TLS SNI (not the IP) routes it — so a blocked address or
+/// port is routed around without a new server. Bounded: the whole known stage
+/// still tests at most a few dozen endpoints. Non-frontable links (REALITY,
+/// plain TCP-TLS) produce none, so this is a no-op for them.
+pub const FRONT_VARIANTS: usize = 18;
+
+/// The edge sample when a request carries no per-install seed (tests).
+const DEFAULT_FRONT_SEED: u64 = 0x5a52_4159_4346_524e;
+
 /// Where a found server came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Origin {
@@ -102,6 +113,10 @@ pub struct FinderRequest {
     pub crowd_net: String,
     /// Use the crowd rankings at all.
     pub use_crowd: bool,
+    /// Picks which Cloudflare edges fronting tries. Fixed per install, so
+    /// probe evidence builds up against the same edges, but different between
+    /// installs, so not every client leans on the same few addresses.
+    pub front_seed: u64,
 }
 
 impl Default for FinderRequest {
@@ -114,6 +129,7 @@ impl Default for FinderRequest {
             max_seconds: 90,
             crowd_net: zero_discovery::crowd::ALL_NETS.into(),
             use_crowd: true,
+            front_seed: DEFAULT_FRONT_SEED,
         }
     }
 }
@@ -158,6 +174,15 @@ pub async fn run(request: FinderRequest, tx: Tx, cancel: CancellationToken) {
     for (link, origin) in known {
         let key = zero_discovery::link_key(&link);
         origins.entry(key).or_insert((link, origin));
+    }
+    // BPB-style fronting: front the user's own history links across a bounded
+    // set of Cloudflare edges and test those too, so a config whose written
+    // address or port is blocked is still reached through an edge that is not.
+    for link in
+        zero_discovery::front_via_edges(&request.history, request.front_seed, 1, FRONT_VARIANTS)
+    {
+        let key = zero_discovery::link_key(&link);
+        origins.entry(key).or_insert((link, Origin::Found));
     }
     if !origins.is_empty() && !cancel.is_cancelled() {
         let _ = tx.send(FinderEvent::Stage("known".into()));

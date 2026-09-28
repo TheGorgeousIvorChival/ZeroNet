@@ -55,6 +55,7 @@ import com.zeronet.mobile.ui.components.QrCode
 import com.zeronet.mobile.ui.components.QrScanner
 import com.zeronet.mobile.ui.components.Segmented
 import com.zeronet.mobile.ui.components.TonalButton
+import com.zeronet.mobile.ui.components.ToggleRow
 import com.zeronet.mobile.ui.components.ZeroSheet
 import com.zeronet.mobile.ui.components.ZeroTextField
 import com.zeronet.mobile.ui.icons.ZeroIcons
@@ -87,6 +88,7 @@ fun ServerDetailSheet(
     onFavorite: (Server, Boolean) -> Unit,
     onDelete: (Server) -> Unit,
     onDismiss: () -> Unit,
+    onExcluded: (Server, Boolean) -> Unit = { _, _ -> },
     initiallySharing: Boolean = false,
 ) {
     // Keep the last server while the sheet animates out.
@@ -95,7 +97,7 @@ fun ServerDetailSheet(
     val s = shown
     ZeroSheet(visible = server != null, onDismiss = onDismiss, title = s?.let { serverTitle(LocalContext.current, it, currentLocale()) } ?: "") {
         if (s != null) {
-            DetailContent(s, subscriptions, testing, now, onConnect, onTest, onCopyLink, onFavorite, onDelete, initiallySharing)
+            DetailContent(s, subscriptions, testing, now, onConnect, onTest, onCopyLink, onFavorite, onExcluded, onDelete, initiallySharing)
         }
     }
 }
@@ -110,6 +112,7 @@ private fun ColumnScope.DetailContent(
     onTest: (Server) -> Unit,
     onCopyLink: (Server) -> Unit,
     onFavorite: (Server, Boolean) -> Unit,
+    onExcluded: (Server, Boolean) -> Unit,
     onDelete: (Server) -> Unit,
     initiallySharing: Boolean,
 ) {
@@ -228,6 +231,20 @@ private fun ColumnScope.DetailContent(
         AnimatedVisibility(sharing, enter = fadeIn(ZeroMotion.quick()) + expandVertically(ZeroMotion.quickSize()), exit = fadeOut(ZeroMotion.quick()) + shrinkVertically(ZeroMotion.quickSize())) {
             Column(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 QrCode(s.link, stringResource(R.string.detail_qr_description), Modifier.widthIn(max = 260.dp).fillMaxWidth())
+                Spacer(Modifier.height(12.dp))
+                // The link itself, coloured by part so the host and name stand
+                // out; selectable, and always read left to right.
+                SelectionContainer(Modifier.fillMaxWidth()) {
+                    Text(
+                        com.zeronet.mobile.ui.util.highlightLink(s.link, c),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            textDirection = androidx.compose.ui.text.style.TextDirection.Ltr,
+                        ),
+                        maxLines = 8,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Text(
                     stringResource(R.string.detail_share_warning),
@@ -237,6 +254,15 @@ private fun ColumnScope.DetailContent(
                 )
             }
         }
+        // Rule a bad server out of automatic picks without deleting it; tapping
+        // it by hand still connects.
+        Spacer(Modifier.height(8.dp))
+        ToggleRow(
+            title = stringResource(R.string.detail_auto_select),
+            checked = !s.excluded,
+            onCheckedChange = { use -> onExcluded(s, !use) },
+            subtitle = stringResource(R.string.detail_auto_select_hint),
+        )
         if (s.isUser) {
             Spacer(Modifier.height(8.dp))
             if (!confirmDelete) {

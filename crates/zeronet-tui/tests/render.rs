@@ -234,6 +234,7 @@ fn config(id: i64, remark: &str, address: &str, port: u16, ping: Option<f64>) ->
         } else {
             "user".into()
         },
+        excluded: false,
     }
 }
 

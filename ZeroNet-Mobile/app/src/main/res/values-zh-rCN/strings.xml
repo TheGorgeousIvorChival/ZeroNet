@@ -509,4 +509,9 @@
     <string name="logs_copy">复制</string>
     <string name="logs_share">分享</string>
     <string name="logs_clear">清除</string>
+    <string name="detail_auto_select">用于自动选择</string>
+    <string name="detail_auto_select_hint">关闭后，自动连接和切换会跳过此服务器。仍可点击它手动连接。</string>
+    <string name="badge_skipped">已跳过</string>
+    <string name="settings_speed_floor_adaptive">自适应</string>
+    <string name="settings_speed_floor_adaptive_hint">学习你的网速，放弃明显慢于近期服务器的服务器</string>
 </resources>

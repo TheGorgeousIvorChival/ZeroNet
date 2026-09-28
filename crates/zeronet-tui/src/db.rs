@@ -29,6 +29,11 @@ pub struct ConfigRecord {
     /// `crowd` profiles are ever part of a crowd report.
     #[serde(default = "user_origin")]
     pub origin: String,
+    /// The user excluded this profile from automatic selection: the watchdog
+    /// and the finder never switch *to* it, but the user can still connect to
+    /// it by hand. Lets someone rule out a bad server without deleting it.
+    #[serde(default)]
+    pub excluded: bool,
 }
 
 fn user_origin() -> String {
@@ -124,6 +129,9 @@ pub struct AppSettings {
     pub utls_fingerprint: String,
     /// Split the ClientHello across packets on every TLS-bearing outbound.
     pub fragment_enabled: bool,
+    /// Inject a decoy allow-listed SNI on TLS/REALITY outbounds (raw fake-SNI
+    /// desync). Needs CAP_NET_RAW; without it the decoy is skipped.
+    pub sni_spoof: bool,
     /// Install the default routes over TUN.
     pub tun_auto_route: bool,
     /// Also block traffic that tries to leave around the tunnel.
@@ -207,6 +215,7 @@ impl Default for AppSettings {
             sniffing_route_only: false,
             utls_fingerprint: "chrome".into(),
             fragment_enabled: false,
+            sni_spoof: false,
             tun_auto_route: true,
             tun_strict_route: false,
 
@@ -243,7 +252,7 @@ const METRICS_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 /// Minimum spacing between two metrics prunes.
 const METRICS_PRUNE_INTERVAL_SECS: i64 = 60 * 60;
 /// Schema revision this build migrates databases up to.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone)]
 pub struct Database {
@@ -430,6 +439,14 @@ impl Database {
                 "#,
             )?;
         }
+        if version < 3 {
+            // A profile the user has ruled out of automatic selection without
+            // deleting it: the watchdog and finder skip it, manual connect still
+            // works.
+            tx.execute_batch(
+                "ALTER TABLE configs ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()
     }
@@ -560,6 +577,7 @@ impl Database {
                     "sniffing_route_only" => settings.sniffing_route_only = truthy(&item.1),
                     "utls_fingerprint" => settings.utls_fingerprint = item.1,
                     "fragment_enabled" => settings.fragment_enabled = truthy(&item.1),
+                    "sni_spoof" => settings.sni_spoof = truthy(&item.1),
                     "tun_auto_route" => settings.tun_auto_route = truthy(&item.1),
                     "tun_strict_route" => settings.tun_strict_route = truthy(&item.1),
                     "scanner_mode" => settings.scanner_mode = item.1,
@@ -687,6 +705,7 @@ impl Database {
                 "fragment_enabled",
                 if settings.fragment_enabled { "1" } else { "0" },
             ),
+            ("sni_spoof", if settings.sni_spoof { "1" } else { "0" }),
             (
                 "tun_auto_route",
                 if settings.tun_auto_route { "1" } else { "0" },
@@ -765,7 +784,7 @@ impl Database {
     pub fn get_configs(&self) -> SqlResult<Vec<ConfigRecord>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT id, remark, protocol, address, port, raw_content, is_active, subscription_id, ping_ms, last_used, origin
+            "SELECT id, remark, protocol, address, port, raw_content, is_active, subscription_id, ping_ms, last_used, origin, excluded
              FROM configs ORDER BY is_active DESC, id ASC"
         )?;
 
@@ -782,6 +801,7 @@ impl Database {
                 ping_ms: row.get(8)?,
                 last_used: row.get(9)?,
                 origin: row.get(10)?,
+                excluded: row.get::<_, i64>(11)? != 0,
             })
         })?;
 
@@ -790,6 +810,17 @@ impl Database {
             list.push(item?);
         }
         Ok(list)
+    }
+
+    /// Rule a profile in or out of automatic selection: the watchdog and finder
+    /// skip an excluded one, but a manual connect still works.
+    pub fn set_excluded(&self, id: i64, excluded: bool) -> SqlResult<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE configs SET excluded = ?2 WHERE id = ?1",
+            params![id, i64::from(excluded)],
+        )?;
+        Ok(())
     }
 
     pub fn insert_config(
@@ -1107,12 +1138,15 @@ impl Database {
     }
 
     /// Share links of found servers that worked, most recent success first:
-    /// what the next search tests before anything else.
+    /// what the next search tests before anything else. A profile the user
+    /// excluded is left out, so a search (or its CDN-fronted variants, which
+    /// would be new profiles) cannot bring it back.
     pub fn found_history(&self, limit: usize) -> SqlResult<Vec<String>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
             "SELECT share_link FROM configs
-             WHERE origin != 'user' AND share_link IS NOT NULL AND last_ok IS NOT NULL
+             WHERE origin != 'user' AND excluded = 0
+               AND share_link IS NOT NULL AND last_ok IS NOT NULL
              ORDER BY last_ok DESC, found_ok - found_fail DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
@@ -1327,6 +1361,7 @@ mod tests {
             sniffing_route_only: true,
             utls_fingerprint: "firefox".into(),
             fragment_enabled: true,
+            sni_spoof: true,
             tun_auto_route: false,
             tun_strict_route: true,
 
@@ -1484,6 +1519,26 @@ mod tests {
     }
 
     #[test]
+    fn excluding_a_profile_persists_and_defaults_off() {
+        let db = Database::open_temporary("excluded").expect("open");
+        let a = db
+            .insert_config("A", "vless", "1.1.1.1", 443, "{}", None)
+            .unwrap();
+        // Fresh profiles are available to automatic selection.
+        assert!(!db.get_configs().unwrap()[0].excluded);
+        db.set_excluded(a, true).unwrap();
+        assert!(
+            db.get_configs().unwrap()[0].excluded,
+            "exclusion did not persist"
+        );
+        db.set_excluded(a, false).unwrap();
+        assert!(
+            !db.get_configs().unwrap()[0].excluded,
+            "could not re-include"
+        );
+    }
+
+    #[test]
     fn a_ping_for_a_deleted_profile_is_ignored() {
         let db = Database::open_temporary("ping-gone").expect("open");
         let a = db
@@ -1583,6 +1638,19 @@ mod tests {
                 .find(|c| c.remark == "Found" && c.ping_ms == Some(300.0))
                 .map(|c| c.id)
         );
+    }
+
+    #[test]
+    fn an_excluded_found_server_is_left_out_of_search_history() {
+        let db = Database::open_temporary("history-excluded").unwrap();
+        let a = db
+            .upsert_found(&found("aaaa", "vless://a", "found", 120.0))
+            .unwrap();
+        db.upsert_found(&found("bbbb", "vless://b", "found", 150.0))
+            .unwrap();
+        db.set_excluded(a, true).unwrap();
+        // Neither re-tested nor fronted into new profiles by the next search.
+        assert_eq!(db.found_history(10).unwrap(), vec!["vless://b".to_string()]);
     }
 
     #[test]

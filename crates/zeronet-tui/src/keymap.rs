@@ -88,6 +88,8 @@ pub enum Command {
     Duplicate,
     Delete,
     Rename,
+    /// Rule the selected profile in or out of automatic selection.
+    ToggleExcluded,
     ShowQrCode,
     ScanQrImage,
 
@@ -151,6 +153,7 @@ impl Command {
             Command::Duplicate => "Duplicate",
             Command::Delete => "Delete",
             Command::Rename => "Rename",
+            Command::ToggleExcluded => "Exclude / include from auto-select",
             Command::ShowQrCode => "Show QR code",
             Command::ScanQrImage => "Scan QR image",
             Command::CycleSystemProxy => "Cycle: keep / set / PAC / clear",
@@ -283,6 +286,7 @@ pub fn resolve(key: KeyEvent, context: InputContext) -> Option<Command> {
         KeyCode::Char('k') | KeyCode::Char('K') if ctrl => Some(Command::ScanQrImage),
         KeyCode::Delete => Some(Command::Delete),
         KeyCode::F(2) => Some(Command::Rename),
+        KeyCode::Char('x') | KeyCode::Char('X') if !ctrl => Some(Command::ToggleExcluded),
 
         // ---- system proxy
         KeyCode::Char('P') if ctrl => Some(Command::ClearSystemProxy),
