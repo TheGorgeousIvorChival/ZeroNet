@@ -7,12 +7,45 @@ import org.junit.Test
 class SettingsTest {
 
     @Test
+    fun `a saved Smart evasion level reads as Auto`() {
+        val old = JSONObject().put("evasion", "Smart")
+        assertEquals(EvasionLevel.Auto, Settings.fromJson(old).evasion)
+    }
+
+    @Test
     fun `the old tlshello default moves to 1-1 once, a later choice is kept`() {
         val old = JSONObject().put("fragmentPackets", "tlshello")
         assertEquals("1-1", Settings.fromJson(old).fragmentPackets)
 
         val chosen = Settings(fragmentPackets = "tlshello").toJson()
         assertEquals("tlshello", Settings.fromJson(chosen).fragmentPackets)
+    }
+
+    @Test
+    fun `the old Google remote DNS default moves to Auto once, a later choice is kept`() {
+        val old = JSONObject().put("remoteDns", "Google")
+        assertEquals(RemoteDns.Auto, Settings.fromJson(old).remoteDns)
+
+        val chosen = Settings(remoteDns = RemoteDns.Google).toJson()
+        assertEquals(RemoteDns.Google, Settings.fromJson(chosen).remoteDns)
+    }
+
+    @Test
+    fun `the old 1500 MTU default moves to 9000 once, a later choice is kept`() {
+        val old = JSONObject().put("mtu", 1500)
+        assertEquals(9000, Settings.fromJson(old).mtu)
+
+        val chosen = Settings(mtu = 1500).toJson()
+        assertEquals(1500, Settings.fromJson(chosen).mtu)
+    }
+
+    @Test
+    fun `the old Medium speed floor default moves to Adaptive once, a later choice is kept`() {
+        val old = JSONObject().put("speedFloor", "Medium")
+        assertEquals(SpeedFloor.Adaptive, Settings.fromJson(old).speedFloor)
+
+        val chosen = Settings(speedFloor = SpeedFloor.Medium).toJson()
+        assertEquals(SpeedFloor.Medium, Settings.fromJson(chosen).speedFloor)
     }
 
     @Test

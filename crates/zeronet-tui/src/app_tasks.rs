@@ -314,7 +314,8 @@ pub(crate) struct FeedRows {
 
 /// Fetch a feed and compile its nodes, entirely off the frame loop.
 async fn fetch_and_build(url: String, socks_port: u16, http_port: u16) -> Result<FeedRows, String> {
-    let feed = subscription::fetch_feed(&url).await?;
+    // A panel's heavy JSON variants become its plain link list.
+    let feed = subscription::fetch_feed(&zero_discovery::subscription_fetch_url(&url)).await?;
     tokio::task::spawn_blocking(move || {
         let mut rows = Vec::with_capacity(feed.profiles.len());
         let mut skipped = feed.skipped;

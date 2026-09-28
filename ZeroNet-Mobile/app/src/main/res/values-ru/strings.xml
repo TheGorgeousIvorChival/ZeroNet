@@ -263,7 +263,7 @@
     <string name="settings_ipv6">IPv6 через туннель</string>
     <string name="settings_ipv6_hint">Оставьте выключенным, если сеть этого не требует</string>
     <string name="settings_mtu">Размер пакета (MTU)</string>
-    <string name="settings_mtu_hint">%1$s работает почти везде. Уменьшите, если некоторые сайты зависают.</string>
+    <string name="settings_mtu_hint">%1$s — самый быстрый вариант. Зависающие сайты исправляются автоматически.</string>
 
     <!-- Settings: servers & sources -->
     <string name="settings_sources_card">Серверы и источники</string>
@@ -341,10 +341,8 @@
     <string name="settings_evasion_level">Уровень</string>
     <string name="settings_evasion_strong">Сильный</string>
     <string name="settings_evasion_off_hint">Обычные соединения. Быстрее всего, но легче заблокировать.</string>
-    <string name="settings_evasion_auto_hint">Маскирует трафик, только когда сервер заблокирован</string>
+    <string name="settings_evasion_auto_hint">Подключается обычно, а если сервер заблокирован, разбивает рукопожатие. Начинает с того, что сработало у других в вашей сети.</string>
     <string name="settings_evasion_strong_hint">Всегда маскирует трафик. Немного медленнее, но заблокировать гораздо сложнее.</string>
-    <string name="settings_evasion_smart">Умный</string>
-    <string name="settings_evasion_smart_hint">Пробует сразу несколько способов маскировки и оставляет тот, что проходит в вашей сети. Лучше всего против жёсткой фильтрации.</string>
     <string name="settings_block_quic">Блокировать QUIC</string>
     <string name="settings_block_quic_hint">Приложения переходят на TCP вместо зависаний</string>
     <string name="settings_remote_dns">DNS для заблокированных сайтов</string>

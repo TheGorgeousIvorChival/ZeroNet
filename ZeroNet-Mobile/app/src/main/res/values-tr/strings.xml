@@ -259,7 +259,7 @@
     <string name="settings_ipv6">Tünel üzerinden IPv6</string>
     <string name="settings_ipv6_hint">Ağınız gerektirmedikçe kapalı bırakın</string>
     <string name="settings_mtu">Paket boyutu (MTU)</string>
-    <string name="settings_mtu_hint">%1$s neredeyse her yerde çalışır. Bazı siteler takılırsa daha düşük değer seçin.</string>
+    <string name="settings_mtu_hint">%1$s en hızlısıdır. Takılan siteler otomatik olarak düzeltilir.</string>
 
     <!-- Settings: servers & sources -->
     <string name="settings_sources_card">Sunucular ve kaynaklar</string>
@@ -333,10 +333,8 @@
     <string name="settings_evasion_level">Güç</string>
     <string name="settings_evasion_strong">Güçlü</string>
     <string name="settings_evasion_off_hint">Düz bağlantılar. En hızlısı, ama engellenmesi daha kolay.</string>
-    <string name="settings_evasion_auto_hint">Trafiği yalnızca bir sunucu engellendiğinde gizler</string>
+    <string name="settings_evasion_auto_hint">Normal bağlanır, bir sunucu engellenince el sıkışmayı böler. Ağınızdaki diğer kullanıcılar için işe yarayan yöntemle başlar.</string>
     <string name="settings_evasion_strong_hint">Trafiği her zaman gizler. Biraz daha yavaş, engellenmesi çok daha zor.</string>
-    <string name="settings_evasion_smart">Akıllı</string>
-    <string name="settings_evasion_smart_hint">Aynı anda birçok gizleme dener ve ağınızın geçirdiğini tutar. Sıkı filtrelemeye karşı en iyisi.</string>
     <string name="settings_block_quic">QUIC\'i engelle</string>
     <string name="settings_block_quic_hint">Uygulamalar takılmak yerine TCP\'ye geri döner</string>
     <string name="settings_remote_dns">Engellenen siteler için DNS</string>

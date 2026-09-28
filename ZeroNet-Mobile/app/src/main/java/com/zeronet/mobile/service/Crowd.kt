@@ -47,6 +47,17 @@ object Crowd {
 
     data class Pick(val id: String, val link: String, val score: Double, val ms: Int)
     data class Result(val id: String, val ok: Boolean, val ms: Int)
+
+    /**
+     * A delay rounded to two significant figures before it leaves the phone:
+     * as good for ranking, and not an exact number that could tie reports
+     * together. Same buckets as the relay and zero-discovery `crowd::bucket_ms`.
+     */
+    internal fun bucketMs(ms: Int): Int {
+        if (ms < 0) return 0
+        val step = if (ms < 100) 10 else if (ms < 1000) 50 else 250
+        return minOf(60_000, Math.round(ms.toDouble() / step).toInt() * step)
+    }
     data class CleanIp(val ip: String, val ms: Int)
 
     private fun file(context: Context) = File(File(context.cacheDir, "crowd").apply { mkdirs() }, "rankings.json")
@@ -132,6 +143,31 @@ object Crowd {
         return out.values.toList()
     }
 
+    /**
+     * Whether others on [network] got through better with the ClientHello
+     * split than without: then the engine tries fragmented connections first
+     * instead of rediscovering it. Needs a clear margin and at least two
+     * reporters, so one bad report does not flip it.
+     */
+    fun fragmentFirst(rankings: JSONObject, network: String): Boolean {
+        val nets = rankings.optJSONObject("nets") ?: return false
+        for (name in fallbacks(network)) {
+            val methods = nets.optJSONObject(name)?.optJSONArray("methods") ?: continue
+            var plain: Double? = null
+            var fragment: Double? = null
+            for (i in 0 until methods.length()) {
+                val m = methods.optJSONObject(i) ?: continue
+                when (m.optString("id")) {
+                    "tls:plain" -> plain = m.optDouble("score")
+                    "tls:fragment" -> if (m.optInt("reporters") >= 2) fragment = m.optDouble("score")
+                }
+            }
+            val split = fragment ?: continue
+            return split > (plain ?: 0.5) + 0.1
+        }
+        return false
+    }
+
     /** Clean Cloudflare addresses others found on [network]. */
     fun cleanIps(rankings: JSONObject, network: String): List<CleanIp> {
         val nets = rankings.optJSONObject("nets") ?: return emptyList()
@@ -181,8 +217,8 @@ object Crowd {
         fun body(net: String?) = JSONObject()
             .put("v", 1)
             .put("nonce", dailyNonce(context))
-            .put("results", JSONArray().also { a -> results.take(MAX_RESULTS).forEach { a.put(JSONObject().put("id", it.id).put("ok", it.ok).put("ms", it.ms)) } })
-            .put("clean", JSONArray().also { a -> clean.take(MAX_CLEAN).forEach { a.put(JSONObject().put("ip", it.ip).put("ms", it.ms)) } })
+            .put("results", JSONArray().also { a -> results.take(MAX_RESULTS).forEach { a.put(JSONObject().put("id", it.id).put("ok", it.ok).put("ms", bucketMs(it.ms))) } })
+            .put("clean", JSONArray().also { a -> clean.take(MAX_CLEAN).forEach { a.put(JSONObject().put("ip", it.ip).put("ms", bucketMs(it.ms))) } })
             // Techniques the core measured here, ids from its fixed vocabulary.
             .apply { if (methodCount > 0) put("methods", methods) }
             .apply { if (net != null) put("net", net) }

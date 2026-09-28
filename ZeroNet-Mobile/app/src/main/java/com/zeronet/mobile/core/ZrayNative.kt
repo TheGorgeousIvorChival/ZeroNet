@@ -31,6 +31,7 @@ object ZrayNative {
 
     @JvmStatic external fun buildConfig(requestJson: String): String
     @JvmStatic external fun parseLinks(text: String): String
+    @JvmStatic external fun subscriptionFetchUrl(address: String): String
     /** `{"links": [...], "seed": n, "max": n}` → `{"links": [...]}`: CDN-fronted
      *  TLS links re-aimed at Cloudflare edge IPs (SNI/Host kept). */
     @JvmStatic external fun frontLinks(requestJson: String): String

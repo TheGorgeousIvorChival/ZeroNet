@@ -752,6 +752,27 @@ pub extern "system" fn Java_com_zeronet_mobile_core_ZrayNative_parseLinks<'local
     java_string(&mut env, &answer.to_string())
 }
 
+/// `subscriptionFetchUrl(address): String` — the address to download for a
+/// subscription the user added; a BPB panel's is rewritten to its smallest
+/// equivalent (`zero_discovery::panel`). Never logs the address: a panel's
+/// path is its password.
+#[no_mangle]
+pub extern "system" fn Java_com_zeronet_mobile_core_ZrayNative_subscriptionFetchUrl<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    address: JString<'local>,
+) -> jstring {
+    let answer = match read_string(&mut env, &address) {
+        Ok(address) => contained(
+            "subscriptionFetchUrl",
+            || address.clone(),
+            || zero_discovery::subscription_fetch_url(&address),
+        ),
+        Err(_) => String::new(),
+    };
+    java_string(&mut env, &answer)
+}
+
 /// `frontLinks(requestJson): String` — `{"links": […]}`. The request is
 /// `{"links": […], "seed": n, "max": n}`: each CDN-fronted TLS link is
 /// re-aimed at a bounded sample of Cloudflare edge IPs (SNI and Host kept),

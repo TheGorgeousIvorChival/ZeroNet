@@ -166,8 +166,8 @@ fun ConnectionMoreSheet(visible: Boolean, s: Settings, reconnect: Boolean, actio
                 { v -> actions.onChange { it.copy(ipv6 = v) } },
                 subtitle = stringResource(R.string.settings_ipv6_hint),
             )
-            LabeledBlock(stringResource(R.string.settings_mtu), subtitle = stringResource(R.string.settings_mtu_hint, Num.int(1500, locale))) {
-                val selected = MTU_OPTIONS.minByOrNull { kotlin.math.abs(it - s.mtu) } ?: 1500
+            LabeledBlock(stringResource(R.string.settings_mtu), subtitle = stringResource(R.string.settings_mtu_hint, Num.int(9000, locale))) {
+                val selected = MTU_OPTIONS.minByOrNull { kotlin.math.abs(it - s.mtu) } ?: 9000
                 Segmented(
                     MTU_OPTIONS,
                     selected,

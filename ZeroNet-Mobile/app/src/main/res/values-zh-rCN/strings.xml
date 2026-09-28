@@ -257,7 +257,7 @@
     <string name="settings_ipv6">通过隧道使用 IPv6</string>
     <string name="settings_ipv6_hint">除非你的网络需要，否则请保持关闭</string>
     <string name="settings_mtu">数据包大小（MTU）</string>
-    <string name="settings_mtu_hint">%1$s 几乎适用于所有网络。如果某些网站卡住，可调低。</string>
+    <string name="settings_mtu_hint">%1$s 最快。卡住的网站会自动处理。</string>
 
     <!-- Settings: servers & sources -->
     <string name="settings_sources_card">服务器和来源</string>
@@ -329,10 +329,8 @@
     <string name="settings_evasion_level">强度</string>
     <string name="settings_evasion_strong">强</string>
     <string name="settings_evasion_off_hint">普通连接。最快，但更容易被封锁。</string>
-    <string name="settings_evasion_auto_hint">仅在服务器被封锁时伪装流量</string>
+    <string name="settings_evasion_auto_hint">正常连接；服务器被封锁时拆分握手。优先使用你所在网络上其他人验证有效的方法。</string>
     <string name="settings_evasion_strong_hint">始终伪装流量。略慢，但更难被封锁。</string>
-    <string name="settings_evasion_smart">智能</string>
-    <string name="settings_evasion_smart_hint">同时尝试多种伪装，保留你的网络能通过的那一种。应对严格封锁效果最好。</string>
     <string name="settings_block_quic">阻止 QUIC</string>
     <string name="settings_block_quic_hint">应用会回退到 TCP，而不是卡住</string>
     <string name="settings_remote_dns">被封锁站点的 DNS</string>

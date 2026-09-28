@@ -79,4 +79,15 @@ class SustainedDownloadTest {
         val window = List(20) { if (it < 15) 2_000_000L + it else 0L }
         org.junit.Assert.assertEquals(2_000_007L, sustainedDownload(window))
     }
+
+    @Test
+    fun `clearing forgets the last network's baseline`() {
+        val f = AdaptiveFloor()
+        f.record(5_000_000)
+        f.record(6_000_000)
+        assertTrue(f.tooSlow(100_000))
+        f.clear()
+        assertEquals(0L, f.effectiveFloorBps())
+        assertFalse(f.tooSlow(100_000))
+    }
 }

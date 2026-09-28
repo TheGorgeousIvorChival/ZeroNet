@@ -643,7 +643,6 @@ private fun EvasionCard(s: Settings, q: SettingsQuery, reconnect: Boolean, actio
                         EvasionLevel.Off -> R.string.settings_evasion_off_hint
                         EvasionLevel.Auto -> R.string.settings_evasion_auto_hint
                         EvasionLevel.Strong -> R.string.settings_evasion_strong_hint
-                        EvasionLevel.Smart -> R.string.settings_evasion_smart_hint
                     },
                 ),
             ) {
@@ -655,7 +654,6 @@ private fun EvasionCard(s: Settings, q: SettingsQuery, reconnect: Boolean, actio
                                 EvasionLevel.Off -> R.string.option_off
                                 EvasionLevel.Auto -> R.string.option_auto
                                 EvasionLevel.Strong -> R.string.settings_evasion_strong
-                                EvasionLevel.Smart -> R.string.settings_evasion_smart
                             },
                         )
                     },
@@ -672,6 +670,7 @@ private fun EvasionCard(s: Settings, q: SettingsQuery, reconnect: Boolean, actio
                         val enabled = s.customDns.isBlank()
                         ZeroChip(
                             text = when (dns) {
+                                RemoteDns.Auto -> stringResource(R.string.option_auto)
                                 RemoteDns.Cloudflare -> "Cloudflare"
                                 RemoteDns.Google -> "Google"
                                 RemoteDns.Quad9 -> "Quad9"

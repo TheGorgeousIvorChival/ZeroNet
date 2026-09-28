@@ -4112,7 +4112,7 @@ impl App<'_> {
             socks_port: self.settings.socks_port,
             http_port: Some(self.settings.http_port),
             remote_dns: zero_config::RemoteDns::parse(&self.settings.remote_dns)
-                .unwrap_or(zero_config::RemoteDns::Google),
+                .unwrap_or(zero_config::RemoteDns::Auto),
             // The local resolver is engine policy, not a profile setting —
             // see the DNS gap noted in `daemon.rs`. Until it is wired, every
             // import gets the same one rather than reading a setting that
@@ -4720,7 +4720,7 @@ impl App<'_> {
             ComponentId::SettingDnsCycle => {
                 self.settings.remote_dns = cycle(
                     &self.settings.remote_dns,
-                    &["google", "cloudflare", "quad9", "adguard"],
+                    &["auto", "google", "cloudflare", "quad9", "adguard"],
                 );
                 self.save_and_report(format!("Remote DNS: {}", self.settings.remote_dns));
                 self.reapply_engine_settings().await?;

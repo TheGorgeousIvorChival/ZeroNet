@@ -259,7 +259,7 @@
     <string name="settings_ipv6">IPv6 از داخل تونل</string>
     <string name="settings_ipv6_hint">خاموش بماند، مگر شبکه‌تان به آن نیاز داشته باشد</string>
     <string name="settings_mtu">اندازه‌ی بسته (MTU)</string>
-    <string name="settings_mtu_hint">%1$s تقریباً همه‌جا جواب می‌دهد. اگر بعضی سایت‌ها گیر می‌کنند، کمترش کنید.</string>
+    <string name="settings_mtu_hint">%1$s سریع‌ترین است. سایت‌هایی که گیر می‌کنند خودکار درست می‌شوند.</string>
 
     <!-- Settings: servers & sources -->
     <string name="settings_sources_card">سرورها و منابع</string>
@@ -333,10 +333,8 @@
     <string name="settings_evasion_level">شدت</string>
     <string name="settings_evasion_strong">قوی</string>
     <string name="settings_evasion_off_hint">اتصال ساده. سریع‌ترین، ولی راحت‌تر مسدود می‌شود.</string>
-    <string name="settings_evasion_auto_hint">فقط وقتی سروری مسدود شود ترافیک را پنهان می‌کند</string>
+    <string name="settings_evasion_auto_hint">عادی وصل می‌شود و اگر سروری مسدود شد، دست‌دهی را تکه‌تکه می‌فرستد. از همان روشی شروع می‌کند که برای دیگران روی شبکه‌ی شما جواب داده.</string>
     <string name="settings_evasion_strong_hint">ترافیک همیشه پنهان می‌شود. کمی کندتر، ولی خیلی سخت‌تر مسدود می‌شود.</string>
-    <string name="settings_evasion_smart">هوشمند</string>
-    <string name="settings_evasion_smart_hint">چند پوشش را هم‌زمان امتحان می‌کند و همانی را نگه می‌دارد که شبکه‌ی شما عبورش می‌دهد. بهترین گزینه در برابر فیلترینگ سخت.</string>
     <string name="settings_block_quic">مسدود کردن QUIC</string>
     <string name="settings_block_quic_hint">برنامه‌ها به جای گیر کردن، سراغ TCP می‌روند</string>
     <string name="settings_remote_dns">DNS برای سایت‌های مسدود</string>
