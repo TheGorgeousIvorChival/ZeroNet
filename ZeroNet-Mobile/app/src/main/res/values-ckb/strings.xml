@@ -261,7 +261,7 @@
     <string name="settings_ipv6">IPv6 بە تونێلدا</string>
     <string name="settings_ipv6_hint">کوژاوە بمێنێتەوە، مەگەر تۆڕەکەت پێویستی پێی بێت</string>
     <string name="settings_mtu">قەبارەی پاکێت (MTU)</string>
-    <string name="settings_mtu_hint">%1$s تەقریبەن لە هەموو شوێنێک کاردەکات. ئەگەر هەندێک ماڵپەڕ گیر دەکەن، کەمتری بکە.</string>
+    <string name="settings_mtu_hint">%1$s خێراترینە. ئەو ماڵپەڕانەی گیر دەکەن خۆکارانە چارەسەر دەکرێن.</string>
 
     <!-- Settings: servers & sources -->
     <string name="settings_sources_card">سێرڤەرەکان &amp; سەرچاوەکان</string>
@@ -335,10 +335,8 @@
     <string name="settings_evasion_level">هێز</string>
     <string name="settings_evasion_strong">بەهێز</string>
     <string name="settings_evasion_off_hint">پەیوەندی ساکار. خێراترین، بەڵام ئاسانتر بلۆک دەکرێت.</string>
-    <string name="settings_evasion_auto_hint">تەنها کاتێک سێرڤەرێک بلۆک دەکرێت ترافیک دەشارێتەوە</string>
+    <string name="settings_evasion_auto_hint">بە ئاسایی پەیوەست دەبێت، و کاتێک سێرڤەرێک بلۆک کرا دەستپێکی پەیوەندی دابەش دەکات. بەو ڕێگایە دەست پێدەکات کە بۆ کەسانی تر لەسەر تۆڕەکەت کاری کردووە.</string>
     <string name="settings_evasion_strong_hint">هەمیشە ترافیک دەشارێتەوە. کەمێک خاوتر، بەڵام زۆر سەختتر بلۆک دەکرێت.</string>
-    <string name="settings_evasion_smart">زیرەک</string>
-    <string name="settings_evasion_smart_hint">چەند شێوازی شاردنەوە بە هەمان کات تاقی دەکاتەوە و ئەوە دەهێڵێتەوە کە تۆڕەکەت ڕێی پێدەدات. باشترین بۆ فلتەری قورس.</string>
     <string name="settings_block_quic">بلۆککردنی QUIC</string>
     <string name="settings_block_quic_hint">ئەپەکان لەبری گیرکردن، دەگەڕێنەوە بۆ TCP</string>
     <string name="settings_remote_dns">DNS بۆ ماڵپەڕە بلۆککراوەکان</string>

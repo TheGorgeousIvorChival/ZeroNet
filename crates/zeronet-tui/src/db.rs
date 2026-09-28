@@ -187,7 +187,7 @@ impl Default for AppSettings {
             tun_enabled: true,
             tun_device_name: "zeronet0".into(),
             tun_mtu: 1500,
-            remote_dns: "google".into(),
+            remote_dns: "auto".into(),
             custom_dns: "".into(),
             anti_sanction: "auto".into(),
             socks_port: 10808,

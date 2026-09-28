@@ -851,7 +851,7 @@ pub fn prepare_runnable_config_with(raw_config: &str, options: &EngineOptions) -
             listen: options.listen_address().to_string(),
             socks_port: options.socks_port,
             http_port: Some(options.http_port),
-            remote_dns: zero_config::RemoteDns::Google,
+            remote_dns: zero_config::RemoteDns::Auto,
             local_dns: zero_config::LocalDns::Google,
             anti_sanction_dns: zero_config::AntiSanctionDns::Auto,
             fragment: options.fragment_enabled,

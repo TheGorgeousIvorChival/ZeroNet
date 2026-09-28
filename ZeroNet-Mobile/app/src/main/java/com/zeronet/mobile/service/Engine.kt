@@ -294,6 +294,8 @@ object Engine {
     /** Seconds the current primary has been primary: the shared speed history
      *  still holds the previous server's samples until a full window passes. */
     private var adaptiveSeconds = 0
+    /** Set on a network move; the speed monitor then forgets its baseline. */
+    @Volatile private var adaptiveResetPending = false
     /**
      * The user's own country (ISO-3166 alpha-2, upper case) from the cellular
      * network, or "" when unknown / on Wi-Fi. Cached per connection run and per
@@ -306,6 +308,8 @@ object Engine {
     private val crowdResults = LinkedHashMap<String, Crowd.Result>()
     /** Clean Cloudflare addresses others found on this network, used after the user's own scan results. */
     @Volatile private var crowdCleanIps: List<String> = emptyList()
+    /** Others on this network got through better fragmented: start that way. */
+    @Volatile private var crowdFragmentFirst = false
     private var since = 0L
 
     private data class Alive(val server: Server, val delayMs: Int)
@@ -452,7 +456,14 @@ object Engine {
             disconnect()
             return
         }
-        if (moved) EngineLog.i("network changed (${NetworkIdentity.label(app).ifBlank { "unknown" }})")
+        if (moved) {
+            EngineLog.i("network changed (${NetworkIdentity.label(app).ifBlank { "unknown" }})")
+            // Speeds learned on the last network say nothing about this one:
+            // fibre's baseline would condemn every server on mobile data.
+            // Cleared by the monitor, which owns that state, not from this
+            // callback thread.
+            adaptiveResetPending = true
+        }
         // Blocked and waiting for a retry: a new network is worth trying at once.
         if (!running && blocker != null) retryNow.trySend(Unit)
         if (!running) return
@@ -653,6 +664,7 @@ object Engine {
         val rankings = withContext(Dispatchers.IO) { Crowd.rankings(app, null, CROWD_FETCH_MS) }
         val picks = rankings?.let { Crowd.picks(it, crowdName, CROWD_PICKS) }.orEmpty()
         crowdCleanIps = rankings?.let { Crowd.cleanIps(it, crowdName) }.orEmpty().map { "${it.ip}:443" }
+        crowdFragmentFirst = rankings?.let { Crowd.fragmentFirst(it, crowdName) } ?: false
         val history = withContext(Dispatchers.IO) { store.historyLinks(network, 12) }
         val links = (history + picks.map { it.link }).distinct()
         if (links.isEmpty()) return emptySet()
@@ -1007,7 +1019,8 @@ object Engine {
             .put("iran_direct", s.iranDirect).put("block_ads", s.blockAds)
             .put("block_quic", s.blockQuic && s.profile != ConnectionProfile.Gaming)
             // Fragmenting the ClientHello costs round trips; Fast and Gaming skip it.
-            .put("evasion", if (s.profile != ConnectionProfile.Normal) "off" else when (s.evasion) { EvasionLevel.Off -> "off"; EvasionLevel.Auto -> "auto"; EvasionLevel.Strong -> "strong"; EvasionLevel.Smart -> "smart" })
+            .put("evasion", if (s.profile != ConnectionProfile.Normal) "off" else when (s.evasion) { EvasionLevel.Off -> "off"; EvasionLevel.Auto -> "auto"; EvasionLevel.Strong -> "strong" })
+            .put("fragment_first", crowdFragmentFirst)
             .put("fragment_packets", s.fragmentPackets.trim().ifEmpty { "1-1" })
             .put("dns", JSONObject().put("remote", s.remoteDns.name.lowercase()).put("custom", s.customDns.trim()).put("local", "google").put("anti_sanction", s.antiSanctionDns.name.lowercase()).put("custom_anti_sanction", s.customAntiSanction.trim()).put("fakedns", s.fakeDns))
             // The user's own scan first, then what others found on this network.
@@ -1118,6 +1131,13 @@ object Engine {
         // speed says nothing about the server. The per-config best is banked
         // when the primary changes.
         val adaptive = settings.speedFloor == SpeedFloor.Adaptive
+        if (adaptiveResetPending) {
+            adaptiveResetPending = false
+            adaptiveFloor.clear()
+            adaptivePrimaryKey = null
+            adaptivePeakBps = 0
+            adaptiveSeconds = 0
+        }
         val window = downHistory.toList().takeLast(SPEED_WINDOW)
         var sustained: Long? = null
         if (adaptive) {
@@ -1611,7 +1631,8 @@ object Engine {
     }
 
     private fun fetchSubscription(sub: Subscription): ImportResult = runCatching {
-        val body = httpGet(sub.url)
+        // A panel's heavy JSON variants become its plain link list.
+        val body = httpGet(ZrayNative.subscriptionFetchUrl(sub.url).ifEmpty { sub.url })
         val result = importText(body, Server.SOURCE_SUB_PREFIX + sub.id)
         // An answer with nothing in it (a panel's error page, an expired
         // token) would otherwise read as a successful import of nothing.
@@ -1782,6 +1803,9 @@ internal class AdaptiveFloor {
 
     /** The learned baseline: the median of recent speeds, once at least two
      *  configs have been seen (one is not a comparison). */
+    /** Forget every recorded speed: the network changed. */
+    fun clear() = recent.clear()
+
     fun baseline(): Long? {
         if (recent.size < 2) return null
         val sorted = recent.sorted()

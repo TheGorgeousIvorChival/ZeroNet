@@ -16,7 +16,11 @@ enum class ConnectionMode { Vpn, Proxy }
 enum class ConnectionProfile { Normal, Fast, Gaming }
 enum class AutoConnect { Off, OnAppStart, OnBoot }
 enum class AppFilterMode { All, OnlySelected, AllExceptSelected }
-enum class EvasionLevel { Off, Auto, Strong, Smart }
+/** How much ClientHello fragmenting to use. [Auto] tries each server as is
+ *  first and fragmented if that fails, starting fragmented where other users
+ *  reported that works better (it absorbed the old "Smart" level; a saved
+ *  "Smart" reads as [Auto]). */
+enum class EvasionLevel { Off, Auto, Strong }
 
 /**
  * Slowest download ZeroNet tolerates before moving to another server.
@@ -39,7 +43,7 @@ enum class ThemeMode { System, Light, Dark }
 enum class Palette { GoldenDark, Nightshade, Arctic, Sakura, Paper, Contrast }
 enum class MotionLevel { Full, Reduced }
 enum class AppLanguage { System, English, Persian, Azerbaijani, Kurdish, Arabic, Russian, Turkish, Chinese }
-enum class RemoteDns { Cloudflare, Google, Quad9, AdGuard }
+enum class RemoteDns { Auto, Cloudflare, Google, Quad9, AdGuard }
 
 /** Iranian anti-sanction resolvers for services that block Iranian IPs. Mirrors
  *  zero-config `AntiSanctionDns`; [Off] resolves those names like any other. */
@@ -59,11 +63,15 @@ data class Settings(
     val autoConnect: AutoConnect = AutoConnect.Off,
     val autoSwitch: Boolean = true,
     /** Move off a server whose live download speed stays under this. */
-    val speedFloor: SpeedFloor = SpeedFloor.Medium,
+    val speedFloor: SpeedFloor = SpeedFloor.Adaptive,
     /** Threshold in kbps, used only when [speedFloor] is [SpeedFloor.Custom]. */
     val speedFloorKbps: Int = 3000,
     val ipv6: Boolean = false,
-    val mtu: Int = 1500,
+    /** The TUN ends in the in-process TCP stack, so this sizes only the hop
+     *  inside the phone: 9000 carries about four times what 1500 does for
+     *  the same CPU (measured, zero-tun/examples/mtu_bench.rs). The real
+     *  network's packet size is handled per connection in the core. */
+    val mtu: Int = 9000,
     /**
      * Keep the VPN interface up and drop traffic whenever no server carries
      * it: while searching, while the core restarts, and after a failed
@@ -97,7 +105,7 @@ data class Settings(
     // Anti-censorship
     val evasion: EvasionLevel = EvasionLevel.Auto,
     val blockQuic: Boolean = true,
-    val remoteDns: RemoteDns = RemoteDns.Google,
+    val remoteDns: RemoteDns = RemoteDns.Auto,
     /** A user-supplied resolver that overrides [remoteDns] when non-blank.
      *  Accepts a bare IP (e.g. "8.8.8.8"), "tls://…", "https://…/dns-query". */
     val customDns: String = "",
@@ -153,9 +161,11 @@ data class Settings(
         .put("autoConnect", autoConnect.name)
         .put("autoSwitch", autoSwitch)
         .put("speedFloor", speedFloor.name)
+        .put("speedFloorChosen", true)
         .put("speedFloorKbps", speedFloorKbps)
         .put("ipv6", ipv6)
         .put("mtu", mtu)
+        .put("mtuChosen", true)
         .put("killSwitch", killSwitch)
         .put("trustedNetworks", JSONArray(trustedNetworks))
         .put("lastTarget", lastTarget)
@@ -174,6 +184,7 @@ data class Settings(
         .put("evasion", evasion.name)
         .put("blockQuic", blockQuic)
         .put("remoteDns", remoteDns.name)
+        .put("remoteDnsChosen", true)
         .put("customDns", customDns)
         .put("antiSanctionDns", antiSanctionDns.name)
         .put("antiSanctionChosen", true)
@@ -199,10 +210,18 @@ data class Settings(
                 profile = o.enumOr("profile", d.profile),
                 autoConnect = o.enumOr("autoConnect", d.autoConnect),
                 autoSwitch = o.optBoolean("autoSwitch", d.autoSwitch),
-                speedFloor = o.enumOr("speedFloor", d.speedFloor),
+                // Medium saved before Adaptive became the default was the old
+                // default; move it once. A choice saved since is kept.
+                speedFloor = o.enumOr("speedFloor", d.speedFloor).let {
+                    if (it == SpeedFloor.Medium && !o.has("speedFloorChosen")) d.speedFloor else it
+                },
                 speedFloorKbps = o.optInt("speedFloorKbps", d.speedFloorKbps).coerceIn(0, 1_000_000),
                 ipv6 = o.optBoolean("ipv6", d.ipv6),
-                mtu = o.optInt("mtu", d.mtu).coerceIn(1280, 9000),
+                // 1500 saved before the measured default was the old default;
+                // move it once. A choice saved since is kept.
+                mtu = o.optInt("mtu", d.mtu).coerceIn(1280, 9000).let {
+                    if (it == 1500 && !o.has("mtuChosen")) d.mtu else it
+                },
                 killSwitch = o.optBoolean("killSwitch", d.killSwitch),
                 trustedNetworks = o.strings("trustedNetworks").filter { '|' in it }.distinctBy { it.substringBefore('|') },
                 lastTarget = o.optString("lastTarget", d.lastTarget),
@@ -220,7 +239,11 @@ data class Settings(
                 lanPass = o.optString("lanPass", d.lanPass),
                 evasion = o.enumOr("evasion", d.evasion),
                 blockQuic = o.optBoolean("blockQuic", d.blockQuic),
-                remoteDns = o.enumOr("remoteDns", d.remoteDns),
+                // Google saved before "Auto" existed was the old default;
+                // move it once. A choice saved since is kept.
+                remoteDns = o.enumOr("remoteDns", d.remoteDns).let {
+                    if (it == RemoteDns.Google && !o.has("remoteDnsChosen")) d.remoteDns else it
+                },
                 customDns = o.optString("customDns", d.customDns),
                 // Shecan saved before the measured "Auto" existed was the old
                 // default; move it once. A choice saved since is kept.

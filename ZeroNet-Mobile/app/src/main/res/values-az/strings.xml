@@ -260,7 +260,7 @@
     <string name="settings_ipv6">Tunel vasitəsilə IPv6</string>
     <string name="settings_ipv6_hint">Şəbəkəniz tələb etmirsə, sönülü saxlayın</string>
     <string name="settings_mtu">Paket ölçüsü (MTU)</string>
-    <string name="settings_mtu_hint">%1$s demək olar ki, hər yerdə işləyir. Bəzi saytlar donarsa, aşağı salın.</string>
+    <string name="settings_mtu_hint">%1$s ən sürətlisidir. Donan saytlar avtomatik düzəldilir.</string>
 
     <!-- Settings: servers & sources -->
     <string name="settings_sources_card">Serverlər və mənbələr</string>
@@ -334,10 +334,8 @@
     <string name="settings_evasion_level">Güc</string>
     <string name="settings_evasion_strong">Güclü</string>
     <string name="settings_evasion_off_hint">Adi bağlantılar. Ən sürətli, amma bloklamaq daha asan.</string>
-    <string name="settings_evasion_auto_hint">Trafiki yalnız server bloklandıqda maskalayır</string>
+    <string name="settings_evasion_auto_hint">Adi qoşulur, server bloklananda əl sıxmanı bölür. Şəbəkənizdə başqalarında işləyən üsulla başlayır.</string>
     <string name="settings_evasion_strong_hint">Trafiki həmişə maskalayır. Bir az yavaş, amma bloklamaq çox çətin.</string>
-    <string name="settings_evasion_smart">Ağıllı</string>
-    <string name="settings_evasion_smart_hint">Eyni anda bir neçə maskalama sınayır və şəbəkənizin buraxdığını saxlayır. Ağır süzgəcə qarşı ən yaxşısı.</string>
     <string name="settings_block_quic">QUIC-i blokla</string>
     <string name="settings_block_quic_hint">Tətbiqlər donmaq əvəzinə TCP-yə keçir</string>
     <string name="settings_remote_dns">Bloklanmış saytlar üçün DNS</string>

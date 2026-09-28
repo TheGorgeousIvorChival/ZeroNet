@@ -267,7 +267,7 @@
     <string name="settings_ipv6">IPv6 عبر النفق</string>
     <string name="settings_ipv6_hint">اتركه مغلقًا ما لم تحتجه شبكتك</string>
     <string name="settings_mtu">حجم الحزمة (MTU)</string>
-    <string name="settings_mtu_hint">%1$s يعمل في كل مكان تقريبًا. اخفضه إذا تعطّلت بعض المواقع.</string>
+    <string name="settings_mtu_hint">%1$s هو الأسرع. تُعالَج المواقع المتعطّلة تلقائيًا.</string>
 
     <!-- Settings: servers & sources -->
     <string name="settings_sources_card">الخوادم والمصادر</string>
@@ -349,10 +349,8 @@
     <string name="settings_evasion_level">الشدة</string>
     <string name="settings_evasion_strong">قوية</string>
     <string name="settings_evasion_off_hint">اتصالات عادية. الأسرع، لكن أسهل في الحجب.</string>
-    <string name="settings_evasion_auto_hint">يخفي حركة البيانات فقط عندما يُحجب خادم</string>
+    <string name="settings_evasion_auto_hint">يتصل بشكل عادي، ويقسّم المصافحة عندما يُحظر خادم. يبدأ بما نجح للآخرين على شبكتك.</string>
     <string name="settings_evasion_strong_hint">يخفي حركة البيانات دائمًا. أبطأ قليلًا، لكن أصعب بكثير في الحجب.</string>
-    <string name="settings_evasion_smart">ذكي</string>
-    <string name="settings_evasion_smart_hint">يجرّب عدة أساليب تمويه في آنٍ واحد ويُبقي ما تمرّره شبكتك. الأفضل ضد الحجب الصعب.</string>
     <string name="settings_block_quic">حظر QUIC</string>
     <string name="settings_block_quic_hint">تلجأ التطبيقات إلى TCP بدل التعطّل</string>
     <string name="settings_remote_dns">DNS للمواقع المحجوبة</string>
