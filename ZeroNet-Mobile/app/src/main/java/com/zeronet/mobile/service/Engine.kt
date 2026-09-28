@@ -323,6 +323,9 @@ object Engine {
         app = context.applicationContext
         EngineLog.init(app)
         settings = readOptions() ?: settings
+        // Before the core builds a config: the rule sets must already be in
+        // place for the config to use them.
+        com.zeronet.mobile.data.GeoAssets.install(app)?.let { EngineLog.e("rule sets: $it") }
         nativeError = runCatching { ZrayNative.init(app.filesDir.absolutePath, coreLogLevel(settings)) }
             .fold({ it }, { "native library failed to load: ${it.message}" })
         if (nativeError != null) EngineLog.e("native init: $nativeError")
