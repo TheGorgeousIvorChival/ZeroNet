@@ -37,6 +37,13 @@ object Diagnostics {
     const val FAMILY_PREFIX = "family_"
 
     private const val PROBE = "http://www.gstatic.com/generate_204"
+    /**
+     * Through the tunnel the check is HTTPS, certificate-verified, because
+     * that is what browsers need: some servers pass plain HTTP but cannot
+     * carry a TLS session, and every site then fails in the browser with
+     * "secure connection not available" while a plain check said all is well.
+     */
+    private const val TUNNEL_PROBE = "https://www.gstatic.com/generate_204"
     private const val TIMEOUT_MS = 6_000
 
     /** Sites filtered in Iran whose DNS answers are commonly poisoned. */
@@ -111,7 +118,7 @@ object Diagnostics {
     fun tunnel(httpPort: Int): DiagCheck = runCatching {
         val proxy = Proxy(Proxy.Type.HTTP, InetSocketAddress("127.0.0.1", httpPort))
         val started = System.nanoTime()
-        val conn = URL(PROBE).openConnection(proxy) as HttpURLConnection
+        val conn = URL(TUNNEL_PROBE).openConnection(proxy) as HttpURLConnection
         conn.connectTimeout = TIMEOUT_MS
         conn.readTimeout = TIMEOUT_MS
         conn.instanceFollowRedirects = false

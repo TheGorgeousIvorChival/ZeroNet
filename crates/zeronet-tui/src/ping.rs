@@ -20,18 +20,21 @@ pub const PING_TIMEOUT: Duration = Duration::from_millis(2500);
 /// How long the post-connect traffic check may take.
 pub const REAL_DELAY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Where the traffic check goes: a tiny plain-HTTP endpoint that answers
-/// 204. Google's, not Cloudflare's: configs served by Cloudflare Workers
-/// cannot reach Cloudflare addresses, and failed this check while working.
+/// Where the traffic check goes: a tiny endpoint that answers 204. Google's,
+/// not Cloudflare's: configs served by Cloudflare Workers cannot reach
+/// Cloudflare addresses, and failed this check while working.
 const PROBE_HOST: &str = "www.gstatic.com";
 
-/// Send one real request through the local SOCKS port and time it end to
-/// end: SOCKS handshake, the proxy's dial to its server, the server's dial
-/// to the probe, and the response.
+/// Send one real HTTPS request through the local SOCKS port and time it end
+/// to end: SOCKS handshake, the proxy's dial to its server, the server's dial
+/// to the probe, a certificate-verified TLS handshake, and the response.
 ///
 /// A connected engine proves only that the local listeners are up. This is
 /// what proves a profile actually carries traffic, which is the question the
 /// user is asking when a browser set to the system proxy cannot load a page.
+/// It is HTTPS because that is what browsers need: some servers answer plain
+/// HTTP but cannot carry a TLS session, and a plain-HTTP check passed them
+/// while every site failed with "secure connection not available".
 pub async fn real_delay(socks_port: u16) -> Result<Duration, String> {
     tokio::time::timeout(REAL_DELAY_TIMEOUT, real_delay_inner(socks_port))
         .await
@@ -48,7 +51,8 @@ async fn real_delay_inner(socks_port: u16) -> Result<Duration, String> {
     let _ = stream.set_nodelay(true);
 
     // Greeting (no authentication), then CONNECT by name so the probe is
-    // resolved at the far end, as a browser's would be.
+    // resolved at the far end, as a browser's would be. Both go in one write:
+    // the local proxy answers them without waiting on the server.
     let mut request = vec![
         0x05,
         0x01,
@@ -60,14 +64,7 @@ async fn real_delay_inner(socks_port: u16) -> Result<Duration, String> {
         PROBE_HOST.len() as u8,
     ];
     request.extend_from_slice(PROBE_HOST.as_bytes());
-    request.extend_from_slice(&80u16.to_be_bytes());
-    request.extend_from_slice(
-        format!("GET /generate_204 HTTP/1.1\r\nHost: {PROBE_HOST}\r\nConnection: close\r\n\r\n")
-            .as_bytes(),
-    );
-    // Everything goes in one write. The local proxy answers the greeting and
-    // the CONNECT without waiting on the server, so pipelining is safe and
-    // saves two local round trips that would only blur the measurement.
+    request.extend_from_slice(&443u16.to_be_bytes());
     stream
         .write_all(&request)
         .await
@@ -111,10 +108,24 @@ async fn real_delay_inner(socks_port: u16) -> Result<Duration, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    let server_name = rustls_pki_types::ServerName::try_from(PROBE_HOST)
+        .map_err(|e| e.to_string())?
+        .to_owned();
+    let mut tls = tokio_rustls::TlsConnector::from(probe_tls_config())
+        .connect(server_name, stream)
+        .await
+        .map_err(|e| format!("no secure connection through the server: {e}"))?;
+    tls.write_all(
+        format!("GET /generate_204 HTTP/1.1\r\nHost: {PROBE_HOST}\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
+    )
+    .await
+    .map_err(|e| format!("the secure connection dropped: {e}"))?;
+
     let mut head = Vec::with_capacity(256);
     let mut chunk = [0u8; 256];
     while !head.windows(2).any(|w| w == b"\r\n") {
-        let n = stream
+        let n = tls
             .read(&mut chunk)
             .await
             .map_err(|e| format!("the server dropped the connection: {e}"))?;
@@ -134,6 +145,27 @@ async fn real_delay_inner(socks_port: u16) -> Result<Duration, String> {
         Err(format!("the probe answered with HTTP {status}, not 204"))
     }
 }
+
+/// Verifying client config for the traffic check, built once.
+fn probe_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
+    static CONFIG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> =
+        std::sync::OnceLock::new();
+    std::sync::Arc::clone(CONFIG.get_or_init(|| {
+        let roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        std::sync::Arc::new(
+            rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+        )
+    }))
+}
+
 /// How many probes may be in flight at once.
 const MAX_CONCURRENT_PROBES: usize = 16;
 
@@ -259,6 +291,40 @@ pub fn latency_bar(latency_ms: Option<f64>, width: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Live: the watchdog's check through a real engine with a direct route.
+    /// `cargo test -p zeronet-tui real_delay_live -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn real_delay_live_completes_a_verified_https_request() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let config = serde_json::json!({
+            "inbounds": [{"tag": "socks", "listen": "127.0.0.1", "port": port, "protocol": "socks"}],
+            "outbounds": [{"tag": "direct", "protocol": "freedom"}],
+            "dns": {"servers": ["8.8.8.8"]},
+        });
+        let (generation, _) =
+            zero_config::compile_config(&config, zero_core::GenerationId(1)).unwrap();
+        let server = std::sync::Arc::new(zero_runtime::Server::new(zero_runtime::ServerConfig {
+            config: std::sync::Arc::clone(&generation.config),
+            generation: generation.id,
+        }));
+        let running = std::sync::Arc::clone(&server);
+        let task = tokio::spawn(async move {
+            let _ = running.run().await;
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let delay = real_delay(port)
+            .await
+            .expect("verified HTTPS through the engine");
+        println!("real_delay over HTTPS: {delay:?}");
+        task.abort();
+    }
+
     /// A stand-in for the engine's SOCKS port: answers the greeting and the
     /// CONNECT, then plays the far end of the probe with `status`.
     async fn fake_socks(status: &'static str) -> u16 {
@@ -280,17 +346,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_delay_measures_a_204_through_the_socks_port() {
+    async fn a_path_that_answers_plain_http_where_tls_belongs_is_not_working() {
+        // The servers behind "secure connection not available": the tunnel
+        // opens and something answers, but not with a real TLS session. The
+        // old plain-HTTP check counted this 204 as a working path.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let port = fake_socks("204 No Content").await;
-        let delay = real_delay(port).await.expect("a 204 is a working path");
-        assert!(delay < REAL_DELAY_TIMEOUT);
+        let error = real_delay(port).await.unwrap_err();
+        assert!(error.contains("secure connection"), "{error}");
     }
 
     #[tokio::test]
     async fn real_delay_reports_a_broken_path_in_words() {
-        let port = fake_socks("502 Bad Gateway").await;
-        let error = real_delay(port).await.unwrap_err();
-        assert!(error.contains("502"), "{error}");
+        let _ = rustls::crypto::ring::default_provider().install_default();
         // Nothing listening at all.
         let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = closed.local_addr().unwrap().port();
