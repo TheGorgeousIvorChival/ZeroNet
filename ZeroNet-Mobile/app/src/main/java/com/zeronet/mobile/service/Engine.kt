@@ -283,6 +283,9 @@ object Engine {
     @Volatile private var target: ConnectTarget = ConnectTarget.Fastest
     @Volatile private var running = false
 
+    /** Notices the core's tunnel device closing under a connection that still says it is up. */
+    private val tunWatch = TunWatch()
+
     /** Working configs currently behind the balancer, fastest first. */
     private val pool = ArrayList<Alive>()
     /**
@@ -602,6 +605,7 @@ object Engine {
 
     private suspend fun runConnection() {
         pool.clear()
+        tunWatch.reset()
         rung = null
         replacements = 0
         connectStartedAt = System.currentTimeMillis()
@@ -1204,11 +1208,44 @@ object Engine {
                 if (interactive && tick % 2 == 0L) host?.onStats(next)
                 if (upRate + downRate > 0) lastTrafficAt = System.currentTimeMillis()
                 maybeSwitchOnSpeed(downRate, upRate, sessions, downHistory)
+                if (settings.mode == ConnectionMode.Vpn) watchTunnelDevice(o.optBoolean("tun_lost"))
             }
             if (forced || (settings.autoSwitch && tick * 1000 % HEALTH_INTERVAL_MS == 0L)) {
                 healthCheck(NetworkIdentity.current(app) ?: network)
             }
             maybeBackgroundFind(NetworkIdentity.current(app) ?: network)
+        }
+    }
+
+    /**
+     * The VPN interface can close while the core carries on (the system took
+     * it away, another VPN started): the key leaves the status bar and no byte
+     * enters the tunnel, yet nothing else would change the state from
+     * "connected". When the core reports its device gone, bring the interface
+     * back; if it keeps closing, stop and say so.
+     */
+    private suspend fun watchTunnelDevice(lost: Boolean) {
+        when (tunWatch.observe(lost, System.currentTimeMillis())) {
+            TunWatch.Verdict.Fine -> Unit
+            TunWatch.Verdict.Recover -> mutex.withLock {
+                if (!running) return@withLock
+                EngineLog.w("the VPN interface closed while connected: bringing it back")
+                restartCore()
+            }
+            TunWatch.Verdict.GiveUp -> {
+                EngineLog.w("the VPN interface keeps closing: giving up")
+                connectJob?.cancel()
+                monitorJob?.cancel()
+                scope.launch {
+                    mutex.withLock {
+                        teardown()
+                        releaseBlocker()
+                        fail(FailReason.CoreError, "the VPN interface keeps closing")
+                    }
+                    host?.finish()
+                    host = null
+                }
+            }
         }
     }
 

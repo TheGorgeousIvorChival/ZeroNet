@@ -99,6 +99,8 @@ fun ProfileSelector(
                         area = androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height),
                         gap = gap,
                         color = c.accent.copy(alpha = if (c.isDark) 0.16f else 0.13f),
+                        // The cards flow right to left in Persian and Arabic; the blob has to follow.
+                        mirrored = layoutDirection == androidx.compose.ui.unit.LayoutDirection.Rtl,
                         outline = c.accent,
                         corner = corner,
                     )
