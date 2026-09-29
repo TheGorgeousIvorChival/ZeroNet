@@ -390,8 +390,6 @@ fun ConnectGlobe(
                             drawPath(orbitBack[k], tint.copy(alpha = 0.35f * presence), style = if (ORBITS[k].dotted) orbitDotted else orbitSolid)
                         }
                     }
-                    // ---- a satellite, the halves of their orbits behind the globe
-                    if (lod.medium > 0.05f) drawSatellite(center, radius, t, front = false, accent = c.accent)
                     drawCircle(body, radius = radius, center = center)
 
                     // ---- wireframe
@@ -473,9 +471,6 @@ fun ConnectGlobe(
                         }
                     }
                     drawEndpoint(home, camera, center, radius, lerp(tint, c.text, 0.4f), dot, if (reduced) 0f else t % 1600f / 1600f)
-
-                    // ---- the satellite, in front of it
-                    if (lod.medium > 0.05f) drawSatellite(center, radius, t, front = true, accent = c.accent)
 
                     // ---- orbits, front halves, with sparkles riding them
                     if (presence > 0.001f) {

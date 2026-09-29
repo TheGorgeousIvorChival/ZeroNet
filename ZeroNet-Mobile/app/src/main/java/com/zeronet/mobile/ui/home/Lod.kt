@@ -12,7 +12,7 @@ package com.zeronet.mobile.ui.home
  *
  * * **coarse** (always): the disc, its shading, a cap, a couple of patches;
  * * **medium** from [MEDIUM_FROM] to [MEDIUM_FULL]: the big features, the
- *   glow, the orbits and the satellite around Earth;
+ *   glow and the orbits around Earth;
  * * **fine** from [FINE_FROM] to [FINE_FULL]: the graticule, every coastline,
  *   craters, canyons, volcanoes and cloud on Mars.
  */
