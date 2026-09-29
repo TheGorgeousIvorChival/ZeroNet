@@ -25,9 +25,6 @@ import kotlin.math.sin
  * brightness and a scatter of small white dots among them. It is kept quiet
  * on purpose: no sun, no moon, no coloured planets.
  *
- * A satellite goes round the globe itself; it is drawn by the globe (see
- * [drawSatellite]) so it passes behind it.
- *
  * Everything is a function of the clock; positions come from a fixed seed, so
  * the sky is the same every time and the tests can check it.
  */
@@ -185,7 +182,7 @@ private fun DrawScope.drawSky(sky: Sky, unit: Float, ms: Float, dark: Boolean, i
     }
 }
 
-// ------------------------------------------------------------- a satellite
+// ------------------------------------------------------------- orbits
 
 /** Where something on a tilted, flattened orbit is: screen x and y, and depth (positive is in front). */
 internal data class OrbitPoint(val x: Float, val y: Float, val z: Float)
@@ -200,28 +197,4 @@ internal fun orbitPoint(
     val x = center.x + ex * cos(tilt) - ey * sin(tilt)
     val y = center.y + ex * sin(tilt) + ey * cos(tilt)
     return OrbitPoint(x, y, sin(a))
-}
-
-private const val SATELLITE_PERIOD = 9f
-
-/** A satellite: a small body with two solar panels and a light that blinks, on a fast tilted orbit. */
-fun DrawScope.drawSatellite(center: Offset, radius: Float, ms: Float, front: Boolean, accent: Color) {
-    val seconds = ms / 1000f
-    val p = orbitPoint(center, radius * 1.36f, seconds, SATELLITE_PERIOD, 2.4f, 0.22f, 64f)
-    if ((p.z >= 0f) != front) return
-    if (p.z < 0f && (Offset(p.x, p.y) - center).getDistance() < radius) return
-    val unit = radius / 134f
-    val at = Offset(p.x, p.y)
-    // A short trail behind it.
-    val back = orbitPoint(center, radius * 1.36f, seconds - 0.35f, SATELLITE_PERIOD, 2.4f, 0.22f, 64f)
-    drawLine(Color.White.copy(alpha = 0.22f), Offset(back.x, back.y), at, 1.2f * unit, StrokeCap.Round)
-    val panel = Color(0xFF6FA3E8)
-    drawRect(panel, Offset(at.x - 6.4f * unit, at.y - 1.1f * unit), Size(4.4f * unit, 2.2f * unit))
-    drawRect(panel, Offset(at.x + 2.0f * unit, at.y - 1.1f * unit), Size(4.4f * unit, 2.2f * unit))
-    drawRect(Color(0xFFD8D6D0), Offset(at.x - 1.6f * unit, at.y - 1.3f * unit), Size(3.2f * unit, 2.6f * unit))
-    val blink = (seconds * 1.4f) % 1f < 0.18f
-    if (blink) {
-        drawCircle(accent.copy(alpha = 0.35f), 4f * unit, at)
-        drawCircle(Color.White, 1f * unit, at)
-    }
 }

@@ -220,17 +220,6 @@ class CreativeShotsTest {
     @Test fun gamepad_bumpers() = pad("pad_2_bumpers", 1_680)
     @Test fun gamepad_words() = pad("pad_3_end", 2_500)
 
-    // ------------------------------------------------------ the kangaroo
-
-    private val searching = ConnState.Searching(com.zeronet.mobile.model.DiscoveryProgress())
-
-    private fun roo(name: String, profile: com.zeronet.mobile.model.ConnectionProfile, ms: Long = 2_200) =
-        compose.shot(name, advanceMs = ms) { HomeScreen(home(race).copy(conn = searching, profile = profile), {}, {}, {}) }
-
-    @Test fun kangaroo_normal() = roo("roo_normal", com.zeronet.mobile.model.ConnectionProfile.Normal)
-    @Test fun kangaroo_fast() = roo("roo_fast", com.zeronet.mobile.model.ConnectionProfile.Fast, 2_350)
-    @Test fun kangaroo_gaming() = roo("roo_gaming", com.zeronet.mobile.model.ConnectionProfile.Gaming, 2_100)
-
     // --------------------------------------------------------------- Mars
 
     private fun mars(name: String, at: Long) = compose.shot(name, advanceMs = 600) {

@@ -317,11 +317,6 @@ private fun StatusLine(state: HomeState, onRetry: () -> Unit, modifier: Modifier
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        // While a connection is being made, a kangaroo and her joey hop across; the faster the mode, the faster they go.
-        if (!marsWords && (conn is ConnState.Searching || conn is ConnState.Connecting || conn is ConnState.Reconnecting)) {
-            Spacer(Modifier.height(6.dp))
-            com.zeronet.mobile.ui.effects.KangarooRunner(state.profile)
-        }
         if (conn is ConnState.Failed) {
             Spacer(Modifier.height(12.dp))
             ZeroChip(
