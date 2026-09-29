@@ -118,7 +118,20 @@ android {
         // Compressed in the APK: ~40% smaller download on slow mobile links,
         // at the cost of extracting the library once at install time.
         jniLibs { useLegacyPackaging = true }
-        resources { excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "DebugProbesKt.bin") }
+        // The library licence texts are shipped once in assets/licenses; the
+        // per-artifact copies, the version stamps and Kotlin's reflection
+        // metadata (nothing here uses kotlin-reflect) only add entries.
+        resources {
+            excludes += setOf(
+                "/META-INF/{AL2.0,LGPL2.1}",
+                "DebugProbesKt.bin",
+                "/META-INF/androidx/**/LICENSE.txt",
+                "/META-INF/org/jetbrains/**/LICENSE.txt",
+                "/META-INF/*.version",
+                "/kotlin/**/*.kotlin_builtins",
+                "/kotlin/kotlin.kotlin_builtins",
+            )
+        }
     }
 
     // JVM screenshot tests (Robolectric native graphics + Roborazzi).

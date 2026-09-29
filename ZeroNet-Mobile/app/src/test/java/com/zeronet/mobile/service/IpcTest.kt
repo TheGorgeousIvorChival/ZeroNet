@@ -10,6 +10,8 @@ import com.zeronet.mobile.model.ScanResult
 import com.zeronet.mobile.model.ScanState
 import com.zeronet.mobile.model.Server
 import com.zeronet.mobile.model.TrafficStats
+import com.zeronet.mobile.model.WarpPhase
+import com.zeronet.mobile.model.WarpState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -94,6 +96,17 @@ class IpcTest {
         EngineLog.clear(dir)
         assertEquals("", EngineLog.tail(dir, "engine.log"))
         dir.deleteRecursively()
+    }
+
+    @Test
+    fun `the warp request crosses the process boundary intact`() {
+        val states = listOf(
+            WarpState(),
+            WarpState(WarpPhase.Working, listOf("registering", "enrolling")),
+            WarpState(WarpPhase.Done, listOf("done"), "3FA9 C0D1 7B42 E8A5", servers = 3, route = "auto"),
+            WarpState(WarpPhase.Failed, emptyList(), error = "try again"),
+        )
+        for (state in states) assertEquals(state, Ipc.warpFromJson(Ipc.warpToJson(state)))
     }
 
     @Test

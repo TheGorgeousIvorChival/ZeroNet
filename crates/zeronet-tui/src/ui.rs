@@ -33,7 +33,6 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use throbber_widgets_tui::{Throbber, ThrobberState, BRAILLE_SIX};
-use tui_big_text::{BigText, PixelSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
@@ -927,6 +926,21 @@ impl<'a> UiRenderer<'a> {
         }
     }
 
+    /// The route the globe draws: to the server in use, or to the profile that
+    /// would be used, when either names a country.
+    fn globe_route(&self, state: OrbState) -> Option<crate::globe::Route> {
+        let in_use = state != OrbState::Idle && self.stats.active_node_name != "None";
+        let remark = if in_use {
+            Some(self.stats.active_node_name.as_str())
+        } else {
+            self.configs
+                .iter()
+                .find(|config| config.is_active)
+                .map(|config| config.remark.as_str())
+        };
+        remark.and_then(crate::globe::route_to)
+    }
+
     /// The connect orb plus its label.
     fn render_connect_hero(&mut self, frame: &mut Frame, area: Rect) {
         let state = OrbState::from(self.stats.status);
@@ -940,7 +954,20 @@ impl<'a> UiRenderer<'a> {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let geo = connect_orb::render(frame, inner, state, hovered, self.theme, self.effects);
+        let route = self.globe_route(state);
+        let view = connect_orb::GlobeView {
+            home: crate::globe::home(),
+            route: route.as_ref(),
+        };
+        let geo = connect_orb::render(
+            frame,
+            inner,
+            state,
+            hovered,
+            self.theme,
+            self.effects,
+            &view,
+        );
         let glow = match state {
             OrbState::Connected => self.effects.emerald_glow(),
             OrbState::Connecting => self.effects.amber_glow(),
@@ -965,8 +992,20 @@ impl<'a> UiRenderer<'a> {
             geo.radius_y,
         );
 
-        self.render_orb_label(frame, inner, state, hovered);
+        self.render_orb_label(frame, inner, geo, state, hovered);
         self.paint_ring_sheen(frame, inner, geo, glow);
+        let warp_in_use = warp_in_use(state, self.configs);
+        let clock = self.effects.current_time();
+        if warp_in_use && crate::race_lanes::visible(clock, crate::effects::TICKS_PER_SECOND) {
+            crate::race_lanes::render(
+                frame,
+                inner,
+                self.theme,
+                clock,
+                crate::effects::TICKS_PER_SECOND,
+                self.effects.animations_enabled(),
+            );
+        }
     }
 
     /// The same corner-to-corner sheen, kept to the ring so the label in the
@@ -1016,8 +1055,16 @@ impl<'a> UiRenderer<'a> {
         }
     }
 
-    /// Large state text centred inside the ring, with a hint beneath it.
-    fn render_orb_label(&mut self, frame: &mut Frame, inner: Rect, state: OrbState, hovered: bool) {
+    /// The state in a pill over the south of the globe, so the map stays
+    /// readable and the words stay on top of it.
+    fn render_orb_label(
+        &mut self,
+        frame: &mut Frame,
+        inner: Rect,
+        geo: connect_orb::OrbGeometry,
+        state: OrbState,
+        hovered: bool,
+    ) {
         let color = match state {
             OrbState::Connected => self.effects.emerald_glow(),
             OrbState::Connecting => self.effects.amber_glow(),
@@ -1031,40 +1078,29 @@ impl<'a> UiRenderer<'a> {
             }
         };
 
-        let label = state.label();
-        // `HalfHeight` glyphs are 8 rows tall in full size, 4 here; anything
-        // narrower than the text needs the plain fallback.
-        let big_w = label.len() as u16 * 8;
-        let big_h = 4u16;
-
-        if inner.width >= big_w + 2 && inner.height >= big_h + 3 {
-            let big_area = Rect {
-                x: inner.x + (inner.width.saturating_sub(big_w)) / 2,
-                y: inner.y + (inner.height.saturating_sub(big_h)) / 2,
-                width: big_w.min(inner.width),
-                height: big_h,
-            };
-            let big = BigText::builder()
-                .pixel_size(PixelSize::HalfHeight)
-                .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
-                .lines(vec![Line::from(label)])
-                .centered()
-                .build();
-            frame.render_widget(big, big_area);
-        } else if inner.height > 0 {
-            let mid = Rect {
-                x: inner.x,
-                y: inner.y + inner.height / 2,
-                width: inner.width,
-                height: 1,
-            };
-            frame.render_widget(
-                Paragraph::new(label)
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                mid,
-            );
+        let text = format!("  {}  ", state.label());
+        let width = (text.chars().count() as u16).min(inner.width);
+        if width == 0 || inner.height == 0 {
+            return;
         }
+        // Low on the globe, but inside its outline, and never off the panel.
+        let row = (geo.center_y + geo.radius_y * 0.62).round() as u16;
+        let y = row.clamp(inner.y, inner.y + inner.height - 1);
+        let area = Rect {
+            x: inner.x + (inner.width - width) / 2,
+            y,
+            width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(text).alignment(Alignment::Center).style(
+                Style::default()
+                    .fg(color)
+                    .bg(self.theme.surface)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            area,
+        );
     }
 
     // ------------------------------------------------------------ node list
@@ -1281,17 +1317,30 @@ impl<'a> UiRenderer<'a> {
                 } else {
                     name
                 };
-                // Found by the finder: a public feed (◇) or others' reports (✦).
-                match cfg.origin.as_str() {
-                    "found" => Cell::from(Line::from(vec![
-                        Span::styled("◇ ", Style::default().fg(self.theme.info)),
-                        Span::raw(name),
-                    ])),
-                    "crowd" => Cell::from(Line::from(vec![
-                        Span::styled("✦ ", Style::default().fg(self.theme.ok)),
-                        Span::raw(name),
-                    ])),
-                    _ => Cell::from(name),
+                // A WARP account wears the picture made from its keys, so two
+                // accounts in the list are told apart at a glance.
+                if let Some(glyph) = account_glyph(&cfg.raw_content) {
+                    let (r, g, b) = zero_discovery::glyph::rgb_of_hue(glyph.hue);
+                    Cell::from(Line::from(vec![
+                        Span::styled(
+                            glyph.braille(),
+                            Style::default().fg(self.theme.adapt(Color::Rgb(r, g, b))),
+                        ),
+                        Span::raw(format!(" {name}")),
+                    ]))
+                } else {
+                    // Found by the finder: a public feed (◇) or others' reports (✦).
+                    match cfg.origin.as_str() {
+                        "found" => Cell::from(Line::from(vec![
+                            Span::styled("◇ ", Style::default().fg(self.theme.info)),
+                            Span::raw(name),
+                        ])),
+                        "crowd" => Cell::from(Line::from(vec![
+                            Span::styled("✦ ", Style::default().fg(self.theme.ok)),
+                            Span::raw(name),
+                        ])),
+                        _ => Cell::from(name),
+                    }
                 }
             };
 
@@ -2539,6 +2588,44 @@ pub(crate) fn sweep_area(inner: Rect, pill_width: u16) -> Rect {
         width: pill_width.min(inner.width.saturating_sub(1)),
         height: 1.min(inner.height),
     }
+}
+
+/// The picture for a `warp://` profile, worked out once per link: the
+/// fingerprint needs a key derivation, too much to repeat on every frame.
+fn account_glyph(raw: &str) -> Option<zero_discovery::glyph::Glyph> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Mutex, OnceLock};
+
+    if !raw.starts_with(zero_config::share_link::WARP_LINK_SCHEME) {
+        return None;
+    }
+    static CACHE: OnceLock<Mutex<HashMap<u64, Option<zero_discovery::glyph::Glyph>>>> =
+        OnceLock::new();
+    let mut hasher = DefaultHasher::new();
+    raw.hash(&mut hasher);
+    let key = hasher.finish();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() > 256 {
+        cache.clear();
+    }
+    *cache.entry(key).or_insert_with(|| {
+        zero_discovery::warp::fingerprint(raw)
+            .and_then(|fingerprint| zero_discovery::glyph::Glyph::of(&fingerprint))
+    })
+}
+
+/// Whether the connection in use, or being made, runs through a WARP account:
+/// the only time a route race says anything about it.
+pub fn warp_in_use(state: OrbState, configs: &[ConfigRecord]) -> bool {
+    matches!(state, OrbState::Connected | OrbState::Connecting)
+        && configs
+            .iter()
+            .any(|config| config.is_active && account_glyph(&config.raw_content).is_some())
 }
 
 #[cfg(test)]

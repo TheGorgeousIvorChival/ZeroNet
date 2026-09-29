@@ -37,7 +37,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import com.zeronet.mobile.ui.components.drawBlob
+import com.zeronet.mobile.ui.components.rememberBlob
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
@@ -50,6 +55,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.zeronet.mobile.ui.components.LightningBadge
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
 import com.zeronet.mobile.R
 import com.zeronet.mobile.model.ConnectionProfile
 import com.zeronet.mobile.ui.icons.ZeroIcons
@@ -68,8 +76,34 @@ fun ProfileSelector(
 ) {
     val c = ZeroTheme.colors
     Column(modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        // One blob for the whole row: it sits behind the chosen card and, when
+        // another is chosen, stretches over to it.
+        val blob = rememberBlob(ConnectionProfile.entries.indexOf(selected))
         Row(
-            Modifier.fillMaxWidth().selectableGroup(),
+            Modifier
+                .fillMaxWidth()
+                .drawBehind {
+                    val gap = 10.dp.toPx()
+                    val n = ConnectionProfile.entries.size
+                    val cell = (size.width - gap * (n - 1)) / n
+                    val corner = 18.dp.toPx()
+                    val edge = 1.dp.toPx()
+                    for (i in 0 until n) {
+                        val x = i * (cell + gap)
+                        drawRoundRect(c.surface, Offset(x, 0f), Size(cell, size.height), CornerRadius(corner))
+                        drawRoundRect(c.hairline, Offset(x, edge / 2), Size(cell, size.height - edge), CornerRadius(corner), style = Stroke(edge))
+                    }
+                    drawBlob(
+                        blob = blob,
+                        count = n,
+                        area = androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height),
+                        gap = gap,
+                        color = c.accent.copy(alpha = if (c.isDark) 0.16f else 0.13f),
+                        outline = c.accent,
+                        corner = corner,
+                    )
+                }
+                .selectableGroup(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             ConnectionProfile.entries.forEach { p ->
@@ -114,11 +148,6 @@ private fun ProfileCard(
     val gamingLive = selected && profile == ConnectionProfile.Gaming
     val clock = rememberAmbientClock(gamingLive && !reduced)
 
-    val fill by animateColorAsState(
-        if (selected) c.accent.copy(alpha = if (c.isDark) 0.14f else 0.12f) else c.surface,
-        tween(ZeroMotion.ms(if (reduced) 150 else 260)),
-        label = "profileFill",
-    )
     val content by animateColorAsState(
         if (selected) c.accent else c.muted,
         tween(ZeroMotion.ms(if (reduced) 150 else 260)),
@@ -151,7 +180,6 @@ private fun ProfileCard(
                 scaleX = s; scaleY = s
             }
             .clip(CardShape)
-            .background(fill)
             .then(
                 if (gamingLive) {
                     // A neon edge that chases itself around the card.
@@ -188,11 +216,7 @@ private fun ProfileCard(
                         }
                     }
                 } else {
-                    Modifier.border(
-                        if (selected) 1.5.dp else 1.dp,
-                        if (selected) c.accent else c.hairline,
-                        CardShape,
-                    )
+                    Modifier
                 },
             )
             .selectable(
@@ -205,17 +229,29 @@ private fun ProfileCard(
                     onClick()
                 },
             )
-            .padding(vertical = 12.dp, horizontal = 8.dp),
+            .padding(vertical = 12.dp, horizontal = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Icon(profile.icon(), null, tint = content, modifier = Modifier.size(22.dp))
-        Spacer(Modifier.height(6.dp))
+        if (profile == ConnectionProfile.Fast) {
+            // The lightning strikes while the card is chosen.
+            LightningBadge(size = 30.dp, tint = content, alive = selected)
+        } else {
+            Icon(profile.icon(), null, tint = content, modifier = Modifier.size(22.dp))
+        }
+        Spacer(Modifier.height(4.dp))
         Text(
             stringResource(profile.label()),
             style = MaterialTheme.typography.labelLarge.copy(fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium),
             color = if (selected) c.text else c.muted,
             maxLines = 1,
+        )
+        Text(
+            stringResource(profile.tag()),
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, letterSpacing = 0.sp),
+            color = if (profile == ConnectionProfile.Normal) c.ok else c.muted.copy(alpha = 0.8f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -224,16 +260,27 @@ private fun ConnectionProfile.icon(): ImageVector = when (this) {
     ConnectionProfile.Normal -> ZeroIcons.Shield
     ConnectionProfile.Fast -> ZeroIcons.Bolt
     ConnectionProfile.Gaming -> ZeroIcons.Gamepad
+    ConnectionProfile.Legacy -> ZeroIcons.Clock
 }
 
 private fun ConnectionProfile.label(): Int = when (this) {
     ConnectionProfile.Normal -> R.string.profile_normal
     ConnectionProfile.Fast -> R.string.profile_fast
     ConnectionProfile.Gaming -> R.string.profile_gaming
+    ConnectionProfile.Legacy -> R.string.profile_legacy
+}
+
+/** The line under the name: Normal says it is the one to pick. */
+private fun ConnectionProfile.tag(): Int = when (this) {
+    ConnectionProfile.Normal -> R.string.profile_tag_normal
+    ConnectionProfile.Fast -> R.string.profile_tag_fast
+    ConnectionProfile.Gaming -> R.string.profile_tag_gaming
+    ConnectionProfile.Legacy -> R.string.profile_tag_legacy
 }
 
 private fun ConnectionProfile.hint(): Int = when (this) {
     ConnectionProfile.Normal -> R.string.profile_normal_hint
     ConnectionProfile.Fast -> R.string.profile_fast_hint
     ConnectionProfile.Gaming -> R.string.profile_gaming_hint
+    ConnectionProfile.Legacy -> R.string.profile_legacy_hint
 }

@@ -50,7 +50,8 @@ class ServerStore private constructor(context: Context) :
                 alive_count INTEGER NOT NULL DEFAULT 0,
                 fail_count INTEGER NOT NULL DEFAULT 0,
                 first_seen INTEGER NOT NULL,
-                last_error TEXT
+                last_error TEXT,
+                fingerprint TEXT NOT NULL DEFAULT ''
             )""",
         )
         db.execSQL("CREATE INDEX servers_country ON servers(country)")
@@ -81,6 +82,7 @@ class ServerStore private constructor(context: Context) :
         // Step by step, so any older version reaches the current one.
         if (oldVersion < 2) db.execSQL("ALTER TABLE servers ADD COLUMN last_error TEXT")
         if (oldVersion < 3) db.execSQL("ALTER TABLE servers ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+        if (oldVersion < 4) db.execSQL("ALTER TABLE servers ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
     }
 
     // ------------------------------------------------------------------ reads
@@ -145,10 +147,11 @@ class ServerStore private constructor(context: Context) :
         db.beginTransaction()
         try {
             for (s in servers) {
-                val values = ContentValues(12).apply {
+                val values = ContentValues(13).apply {
                     put("key", s.key); put("link", s.link); put("name", s.name)
                     put("protocol", s.protocol); put("transport", s.transport); put("security", s.security)
                     put("host", s.host); put("port", s.port); put("country", s.country); put("source", s.source)
+                    put("fingerprint", s.fingerprint)
                     put("first_seen", now)
                 }
                 val inserted = db.insertWithOnConflict("servers", null, values, SQLiteDatabase.CONFLICT_IGNORE)
@@ -312,6 +315,7 @@ class ServerStore private constructor(context: Context) :
         val alive = c.getColumnIndexOrThrow("alive_count")
         val fail = c.getColumnIndexOrThrow("fail_count")
         val error = c.getColumnIndexOrThrow("last_error")
+        val fingerprint = c.getColumnIndexOrThrow("fingerprint")
 
         fun read(c: Cursor) = Server(
             key = c.getString(key), link = c.getString(link), name = c.getString(name),
@@ -321,12 +325,13 @@ class ServerStore private constructor(context: Context) :
             aliveCount = c.getInt(alive), failCount = c.getInt(fail),
             excluded = c.getInt(excluded) != 0,
             lastError = if (c.isNull(error)) null else c.getString(error),
+            fingerprint = c.getString(fingerprint).orEmpty(),
         )
     }
 
     companion object {
         private const val DB_NAME = "servers.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
         const val MAX_DISCOVERED = 2000
 
         /** Faster answers earn more; any success earns at least 1. */

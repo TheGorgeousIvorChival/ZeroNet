@@ -9,11 +9,18 @@ enum class ConnectionMode { Vpn, Proxy }
 /**
  * How ZeroNet chooses and runs servers. See `Engine` for what each does.
  *
- * - [Normal]: encrypted (TLS / REALITY) servers only, with backups.
+ * - [Normal] (recommended): encrypted servers with backups, and it does not
+ *   give up: when the usual way finds nothing it goes on to every other route
+ *   and method, fastest first (see `Ladder`).
  * - [Fast]: the first server that works; nothing else.
- * - [Gaming]: lowest ping, UDP allowed, one server that is never switched mid-game.
+ * - [Gaming]: lowest and steadiest ping, UDP allowed, one server that is never
+ *   switched mid-game. It gives up some security for that.
+ * - [Legacy]: what Normal was before it learned to keep trying.
  */
-enum class ConnectionProfile { Normal, Fast, Gaming }
+enum class ConnectionProfile { Normal, Fast, Gaming, Legacy }
+
+/** Whether the profile shapes servers and evasion the way the original Normal did. */
+val ConnectionProfile.classic: Boolean get() = this == ConnectionProfile.Normal || this == ConnectionProfile.Legacy
 enum class AutoConnect { Off, OnAppStart, OnBoot }
 enum class AppFilterMode { All, OnlySelected, AllExceptSelected }
 /** How much ClientHello fragmenting to use. [Auto] tries each server as is
@@ -210,10 +217,14 @@ data class Settings(
                 profile = o.enumOr("profile", d.profile),
                 autoConnect = o.enumOr("autoConnect", d.autoConnect),
                 autoSwitch = o.optBoolean("autoSwitch", d.autoSwitch),
-                // Medium saved before Adaptive became the default was the old
-                // default; move it once. A choice saved since is kept.
+                // Settings saved before Adaptive became the default never had a
+                // choice recorded ("speedFloorChosen"): whatever fixed floor is
+                // in them was the old default or a side effect, so they move
+                // to Adaptive once. A choice saved since, and a custom number,
+                // are kept.
                 speedFloor = o.enumOr("speedFloor", d.speedFloor).let {
-                    if (it == SpeedFloor.Medium && !o.has("speedFloorChosen")) d.speedFloor else it
+                    val fixed = it != SpeedFloor.Adaptive && it != SpeedFloor.Custom
+                    if (fixed && !o.has("speedFloorChosen")) d.speedFloor else it
                 },
                 speedFloorKbps = o.optInt("speedFloorKbps", d.speedFloorKbps).coerceIn(0, 1_000_000),
                 ipv6 = o.optBoolean("ipv6", d.ipv6),

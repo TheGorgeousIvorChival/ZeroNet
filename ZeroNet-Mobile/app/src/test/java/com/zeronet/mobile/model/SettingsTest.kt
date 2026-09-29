@@ -49,6 +49,19 @@ class SettingsTest {
     }
 
     @Test
+    fun `any fixed floor from a build that never recorded a choice moves to Adaptive, a custom number does not`() {
+        for (name in listOf("Off", "Low", "Medium")) {
+            val old = JSONObject().put("speedFloor", name)
+            assertEquals(name, SpeedFloor.Adaptive, Settings.fromJson(old).speedFloor)
+        }
+        val custom = JSONObject().put("speedFloor", "Custom").put("speedFloorKbps", 2500)
+        assertEquals(SpeedFloor.Custom, Settings.fromJson(custom).speedFloor)
+        for (floor in listOf(SpeedFloor.Off, SpeedFloor.Low, SpeedFloor.Medium)) {
+            assertEquals(floor, Settings.fromJson(Settings(speedFloor = floor).toJson()).speedFloor)
+        }
+    }
+
+    @Test
     fun `every field survives a JSON round trip`() {
         val original = Settings(
             mode = ConnectionMode.Proxy,

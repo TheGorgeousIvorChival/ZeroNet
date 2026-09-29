@@ -38,6 +38,9 @@ command -v cargo-ndk >/dev/null || { echo "error: cargo-ndk is not installed (ca
 targets=()
 for abi in $abis; do targets+=(-t "$abi"); done
 
+# Identical functions (generic instantiations mostly) are folded into one.
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,--icf=all"
+
 echo "NDK:     $ANDROID_NDK_HOME"
 echo "ABIs:    $abis (API $api)"
 echo "profile: $profile"

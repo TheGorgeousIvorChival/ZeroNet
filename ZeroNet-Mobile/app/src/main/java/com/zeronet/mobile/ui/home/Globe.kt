@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
@@ -107,6 +108,8 @@ fun ConnectGlobe(
     hudText: String?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    /** A visit to Mars in progress, or null. */
+    trip: MarsTrip.Frame? = null,
 ) {
     val c = ZeroTheme.colors
     val reduced = LocalReducedMotion.current
@@ -116,7 +119,7 @@ fun ConnectGlobe(
     val data by produceState<GlobeData?>(null) {
         value = withContext(Dispatchers.IO) { runCatching { GlobeData.load(context) }.getOrNull() }
     }
-    val home = remember(data) { data?.let { userLocation(context, it) } ?: LatLon(35.69f, 51.39f) }
+    val home = remember(data) { data?.let { userLocation(context, it) } ?: LatLon(35.7f, 51.4f) }
     val target = remember(data, destination) { destination?.let { data?.country(it) } }
     val route = remember(home, target) { target?.let { buildRoute(home, it) } }
 
@@ -251,6 +254,7 @@ fun ConnectGlobe(
         }
     }
 
+    val tripNow by rememberUpdatedState(trip)
     val phaseNow by rememberUpdatedState(phase)
     val gamingNow by rememberUpdatedState(gaming)
 
@@ -341,6 +345,18 @@ fun ConnectGlobe(
                     val t = clock.floatValue
                     val p = phaseNow
                     val f = focus.value
+                    // On a visit to Mars the camera races off: Earth shrinks away
+                    // and the red planet grows into its place.
+                    val visit = tripNow
+                    if (visit != null) {
+                        drawWarp(center, radius, visit.warp, if (c.isDark) Color.White else c.text)
+                        drawMars(center, radius, visit.mars, t, c.isDark)
+                        if (visit.earth < 0.02f) return@onDrawBehind
+                    }
+                    val earth = visit?.earth ?: 1f
+                    // How much to draw for how big Earth looks: far away it is a disc and its coasts.
+                    val lod = Lod.of(radius * earth / density)
+                    withTransform({ scale(earth, earth, pivot = center) }) {
 
                     // ---- camera
                     val swayLon = home.lon + if (reduced) 0f else 32f * sin(t / 11_000f * 2f * PI.toFloat())
@@ -352,7 +368,7 @@ fun ConnectGlobe(
                     // ---- atmosphere and body
                     if (!c.isDark) drawOval(shadow, topLeft = center + Offset(-radius * 0.95f, radius * 0.72f), size = Size(radius * 1.9f, radius * 0.42f))
                     val glowAlpha = (if (c.isDark) 0.30f else 0.07f) * (0.8f + 0.2f * press.value) *
-                        (if (p == OrbPhase.Connected) 1.25f else 1f)
+                        (if (p == OrbPhase.Connected) 1.25f else 1f) * (0.4f + 0.6f * lod.medium)
                     drawCircle(
                         Brush.radialGradient(
                             0.70f to tint.copy(alpha = glowAlpha),
@@ -367,27 +383,33 @@ fun ConnectGlobe(
                     // ---- orbits, back halves (the body then hides what is behind it)
                     if (lastClock >= 0f) spin += (t - lastClock).coerceIn(0f, 100f) * orbitSpeed.value
                     lastClock = t
-                    val presence = orbitPresence.value
+                    val presence = orbitPresence.value * lod.medium
                     if (presence > 0.001f) {
                         orbitPaths(center, radius, spin, orbitFront, orbitBack)
                         for (k in ORBITS.indices) {
                             drawPath(orbitBack[k], tint.copy(alpha = 0.35f * presence), style = if (ORBITS[k].dotted) orbitDotted else orbitSolid)
                         }
                     }
+                    // ---- a satellite, the halves of their orbits behind the globe
+                    if (lod.medium > 0.05f) drawSatellite(center, radius, t, front = false, accent = c.accent)
                     drawCircle(body, radius = radius, center = center)
 
                     // ---- wireframe
                     val d = data
                     if (d != null) {
-                        project(d.graticule, camera, center, radius, frontGrid, backGrid)
-                        project(d.coast, camera, center, radius, frontCoast, backCoast)
+                        if (lod.fine > 0.02f) {
+                            project(d.graticule, camera, center, radius, frontGrid, backGrid, keepBack = c.isDark)
+                        } else {
+                            frontGrid.rewind(); backGrid.rewind()
+                        }
+                        project(d.coast, camera, center, radius, frontCoast, backCoast, lod.coastStride, lod.minRing, keepBack = c.isDark && lod.medium > 0.3f)
                         if (c.isDark) {
-                            drawPath(backGrid, tint.copy(alpha = 0.07f), style = thin)
-                            drawPath(backCoast, tint.copy(alpha = 0.12f), style = thin)
-                            drawPath(frontGrid, tint.copy(alpha = 0.30f), style = thin)
+                            drawPath(backGrid, tint.copy(alpha = 0.07f * lod.fine), style = thin)
+                            if (lod.medium > 0.3f) drawPath(backCoast, tint.copy(alpha = 0.12f), style = thin)
+                            drawPath(frontGrid, tint.copy(alpha = 0.30f * lod.fine), style = thin)
                         } else {
                             // The far side showing through reads as smudges on white.
-                            drawPath(frontGrid, c.text.copy(alpha = 0.09f), style = thin)
+                            drawPath(frontGrid, c.text.copy(alpha = 0.09f * lod.fine), style = thin)
                         }
                         // Chromatic split while the gaming burst runs.
                         val b = boost.value
@@ -397,7 +419,7 @@ fun ConnectGlobe(
                             translate(jitter, jitter * 0.3f) { drawPath(frontCoast, Color(0xFF22E3FF).copy(alpha = 0.55f), style = coastStroke) }
                         }
                         if (c.isDark) {
-                            drawPath(frontCoast, tint.copy(alpha = 0.16f), style = coastGlow)
+                            if (lod.medium > 0.3f) drawPath(frontCoast, tint.copy(alpha = 0.16f * lod.medium), style = coastGlow)
                             drawPath(frontCoast, lerp(tint, c.text, 0.25f), style = coastStroke)
                         } else {
                             // Idle: dark ink; connected/failed: the state colour, still inked down.
@@ -452,6 +474,9 @@ fun ConnectGlobe(
                     }
                     drawEndpoint(home, camera, center, radius, lerp(tint, c.text, 0.4f), dot, if (reduced) 0f else t % 1600f / 1600f)
 
+                    // ---- the satellite, in front of it
+                    if (lod.medium > 0.05f) drawSatellite(center, radius, t, front = true, accent = c.accent)
+
                     // ---- orbits, front halves, with sparkles riding them
                     if (presence > 0.001f) {
                         val sparkleColor = lerp(tint, Color.White, 0.65f)
@@ -490,6 +515,7 @@ fun ConnectGlobe(
                     if (h > 0.001f) drawBrackets(center, radius, h, c.accent, c.accentHot, bracket, t, reduced)
                     val b = boost.value
                     if (b < 1f && gamingNow) drawBoost(center, radius, b, c.accent, c.accentHot, speedLine)
+                    }
                 }
             },
         contentAlignment = Alignment.Center,
@@ -621,12 +647,22 @@ private fun project(
     radius: Float,
     front: Path,
     back: Path,
+    /** Keep every this-many points; the last one of a line is always kept. */
+    stride: Int = 1,
+    /** Lines with fewer points than this are left out. */
+    minPoints: Int = 0,
+    /** Build the far-side path too; false when nothing will draw it. */
+    keepBack: Boolean = true,
 ) {
     front.rewind(); back.rewind()
     val xyz = lines.xyz
     for (l in 0 until lines.lineCount) {
+        val first = lines.starts[l]
+        val last = lines.starts[l + 1] - 1
+        if (last - first + 1 < minPoints) continue
         var side = 0 // 1 front, -1 back, 0 none yet
-        for (i in lines.starts[l] until lines.starts[l + 1]) {
+        for (i in first..last) {
+            if (stride > 1 && (i - first) % stride != 0 && i != last) continue
             val x = xyz[i * 3]; val y = xyz[i * 3 + 1]; val z = xyz[i * 3 + 2]
             val sx = x * cam.ex + y * cam.ey + z * cam.ez
             val sy = x * cam.nx + y * cam.ny + z * cam.nz
@@ -637,7 +673,9 @@ private fun project(
                 if (side == 1) front.lineTo(px, py) else front.moveTo(px, py)
                 side = 1
             } else {
-                if (side == -1) back.lineTo(px, py) else back.moveTo(px, py)
+                if (keepBack) {
+                    if (side == -1) back.lineTo(px, py) else back.moveTo(px, py)
+                }
                 side = -1
             }
         }

@@ -57,7 +57,9 @@ use zeronet_tui::ui::{ActiveTab, UiRenderer};
 
 mod app_finder;
 mod app_tasks;
+mod app_test;
 mod app_update;
+mod app_warp;
 mod launcher;
 
 /// Frame spacing while something animates (~30 fps).
@@ -1246,14 +1248,54 @@ impl<'a> App<'a> {
             return false;
         }
         // The update dialog's light sweep and progress sheen.
-        if matches!(self.modal_state, ModalState::Update { .. })
+        if matches!(
+            self.modal_state,
+            ModalState::Update { .. }
+                | ModalState::Warp {
+                    phase: zeronet_tui::modal::WarpPhase::Working { .. },
+                    ..
+                }
+        ) && self.effects.animations_enabled()
+        {
+            return true;
+        }
+        // The path moving while the connection test runs.
+        if self.bg.test_in_flight
+            && matches!(self.modal_state, ModalState::Connection { .. })
             && self.effects.animations_enabled()
         {
             return true;
         }
+        // The key settling into its fingerprint.
+        if let ModalState::Warp {
+            phase:
+                zeronet_tui::modal::WarpPhase::Done {
+                    fingerprint: Some(fingerprint),
+                    finished_tick,
+                    ..
+                },
+            ..
+        } = &self.modal_state
+        {
+            let elapsed = tick.saturating_sub(*finished_tick);
+            if self.effects.animations_enabled()
+                && elapsed < zeronet_tui::keyfx::reveal_duration(fingerprint.chars().count())
+            {
+                return true;
+            }
+        }
         self.effects.is_animating()
             // A dimmed backdrop hides the ambient sheen and glows entirely.
             || (self.effects.ambient_running() && !self.modal_state.is_active())
+            || (self.effects.animations_enabled()
+                && zeronet_tui::ui::warp_in_use(
+                    zeronet_tui::connect_orb::OrbState::from(self.stats.status),
+                    &self.configs,
+                )
+                && zeronet_tui::race_lanes::visible(
+                    self.effects.current_time(),
+                    zeronet_tui::effects::TICKS_PER_SECOND,
+                ))
             || self.spinner_visible()
             || self.toasts.is_animating(now)
     }
@@ -2208,6 +2250,11 @@ impl<'a> App<'a> {
                     _ => {}
                 }
             }
+            ModalState::Warp { .. } => match key.code {
+                KeyCode::Down | KeyCode::Char('j') => self.warp_move(1),
+                KeyCode::Up | KeyCode::Char('k') => self.warp_move(-1),
+                _ => {}
+            },
             // Copying is the whole point of the share dialog, so Ctrl+C is
             // handled here rather than falling through to the global binding.
             ModalState::ShareConfig { uri, .. }
@@ -2549,6 +2596,8 @@ impl<'a> App<'a> {
             Command::TestLatency => self.refresh_latencies(),
             Command::FindServers => self.start_finder(true),
             Command::ExportAll => self.export_all_profiles(),
+            Command::AddWarp => self.open_warp_dialog(),
+            Command::TestConnection => self.open_connection_test(),
             Command::AddSubscription => self.open_text_modal(
                 "Add Subscription Feed",
                 "Enter the feed URL",
@@ -2789,6 +2838,8 @@ impl<'a> App<'a> {
             MenuAction::ImportFromFile => self.run_command(Command::OpenFile).await?,
             MenuAction::ExportSelected => self.run_command(Command::SaveAs).await?,
             MenuAction::NewProfile => self.run_command(Command::NewProfile).await?,
+            MenuAction::Warp => self.run_command(Command::AddWarp).await?,
+            MenuAction::TestConnection => self.run_command(Command::TestConnection).await?,
             MenuAction::ApplyEndpoint => {
                 if let Some(MenuTarget::ScannerResult(i)) = target {
                     self.apply_scanner_endpoint(i).await?;
@@ -3634,6 +3685,8 @@ impl App<'_> {
         match &self.modal_state {
             ModalState::QuitConfirmation { .. } => self.should_quit = true,
             ModalState::Update { .. } => self.update_primary(),
+            ModalState::Warp { .. } => self.warp_primary().await?,
+            ModalState::Connection { .. } => self.start_connection_test(),
             ModalState::AshesWarning { .. }
             | ModalState::Help { .. }
             | ModalState::ShareConfig { .. } => self.close_modal(),
@@ -4370,6 +4423,9 @@ impl App<'_> {
             }
             ComponentId::QuitConfirmYes => self.confirm_modal().await?,
             ComponentId::UpdatePrimary => self.update_primary(),
+            ComponentId::WarpPrimary => self.warp_primary().await?,
+            ComponentId::TestPrimary => self.start_connection_test(),
+            ComponentId::WarpOption(index) => self.warp_option(index),
             ComponentId::SudoConfirm => self.submit_sudo_password().await?,
             ComponentId::SudoCancel => self.cancel_sudo_dialog().await?,
 
@@ -4379,6 +4435,8 @@ impl App<'_> {
             | ComponentId::AshesWarningDismiss
             | ComponentId::ManualFormCancel
             | ComponentId::UpdateSecondary
+            | ComponentId::WarpSecondary
+            | ComponentId::TestSecondary
             | ComponentId::ModalClose => self.close_modal(),
 
             ComponentId::ModalBackdrop => self.on_backdrop_click(),

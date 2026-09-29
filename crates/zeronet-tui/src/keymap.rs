@@ -107,6 +107,10 @@ pub enum Command {
     FindServers,
     ExportAll,
     AddSubscription,
+    /// Register a free Cloudflare WARP account and add it as a profile.
+    AddWarp,
+    /// Check what this network blocks, and whether the tunnel gets through.
+    TestConnection,
 
     // ---- search
     Find,
@@ -163,6 +167,8 @@ impl Command {
             Command::FindServers => "Find a working server",
             Command::ExportAll => "Export all",
             Command::AddSubscription => "Add subscription",
+            Command::AddWarp => "Get a WARP account",
+            Command::TestConnection => "Test my connection",
             Command::Find => "Find",
             Command::ClearFilter => "Clear filter",
             Command::Help => "Help",
@@ -287,6 +293,8 @@ pub fn resolve(key: KeyEvent, context: InputContext) -> Option<Command> {
         KeyCode::Delete => Some(Command::Delete),
         KeyCode::F(2) => Some(Command::Rename),
         KeyCode::Char('x') | KeyCode::Char('X') if !ctrl => Some(Command::ToggleExcluded),
+        KeyCode::Char('w') | KeyCode::Char('W') if !ctrl => Some(Command::AddWarp),
+        KeyCode::Char('t') | KeyCode::Char('T') if !ctrl => Some(Command::TestConnection),
 
         // ---- system proxy
         KeyCode::Char('P') if ctrl => Some(Command::ClearSystemProxy),
@@ -371,6 +379,8 @@ pub fn help_sections() -> Vec<(&'static str, Vec<Binding>)> {
                 b("F2", Command::Rename),
                 b("Delete", Command::Delete),
                 b("Ctrl+Shift+S", Command::AddSubscription),
+                b("W", Command::AddWarp),
+                b("T", Command::TestConnection),
             ],
         ),
         (

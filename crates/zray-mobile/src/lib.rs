@@ -680,7 +680,9 @@ fn stats_value() -> Option<serde_json::Value> {
         let current = entry[key].as_u64().unwrap_or(0);
         entry[key] = serde_json::json!(current.saturating_add(value));
     }
+    let race = zero_runtime::warp::last_race().map(|report| report.to_json());
     Some(serde_json::json!({
+        "race": race,
         "up": stats.uploaded.load(Ordering::Relaxed),
         "down": stats.downloaded.load(Ordering::Relaxed),
         "sessions": running.server.active_sessions(),

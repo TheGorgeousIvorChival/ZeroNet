@@ -73,6 +73,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import com.zeronet.mobile.ui.components.drawBlob
 import com.zeronet.mobile.R
 import com.zeronet.mobile.ui.components.LocalOverlayHost
 import com.zeronet.mobile.ui.components.LocalRootHaze
@@ -187,19 +188,9 @@ private fun BottomBar(tab: Tab, onTab: (Tab) -> Unit, haze: HazeState, modifier:
     val shape = RoundedCornerShape(28.dp)
     val tabs = Tab.entries
     val index = tab.ordinal
-    // Liquid pill: the leading edge races ahead, the trailing edge follows on
-    // a softer spring, so the pill stretches toward the target and settles.
-    val lead = remember { Animatable(index.toFloat()) }
-    val trail = remember { Animatable(index.toFloat()) }
-    val reduced = LocalReducedMotion.current
-    LaunchedEffect(index) {
-        if (reduced) {
-            lead.snapTo(index.toFloat()); trail.snapTo(index.toFloat())
-        } else {
-            launch { lead.animateTo(index.toFloat(), spring(dampingRatio = 0.8f, stiffness = ZeroMotion.k(700f))) }
-            launch { trail.animateTo(index.toFloat(), spring(dampingRatio = 0.85f, stiffness = ZeroMotion.k(260f))) }
-        }
-    }
+    // The highlight is a blob: it stays stuck to the tab it left, stretches
+    // toward the next one and lands on it with a bounce.
+    val blob = com.zeronet.mobile.ui.components.rememberBlob(index)
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     Row(
         modifier
@@ -208,17 +199,14 @@ private fun BottomBar(tab: Tab, onTab: (Tab) -> Unit, haze: HazeState, modifier:
             .height(BarHeight)
             .glass(haze, shape)
             .drawBehind {
-                val w = size.width / tabs.size
-                val a = minOf(lead.value, trail.value)
-                val b = maxOf(lead.value, trail.value)
                 val inset = 6.dp.toPx()
-                val left = if (rtl) size.width - w * (b + 1) else w * a
-                val width = w * (b - a + 1)
-                drawRoundRect(
-                    color = c.accent.copy(alpha = if (c.isDark) 0.16f else 0.13f),
-                    topLeft = Offset(left + inset, inset),
-                    size = Size(width - inset * 2, size.height - inset * 2),
-                    cornerRadius = CornerRadius((size.height - inset * 2) / 2),
+                drawBlob(
+                    blob = blob,
+                    count = tabs.size,
+                    area = androidx.compose.ui.geometry.Rect(inset, inset, size.width - inset, size.height - inset),
+                    gap = 0f,
+                    color = c.accent.copy(alpha = if (c.isDark) 0.18f else 0.14f),
+                    mirrored = rtl,
                 )
             }
             .selectableGroup(),

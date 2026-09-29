@@ -41,6 +41,7 @@ import com.zeronet.mobile.model.FailReason
 import com.zeronet.mobile.model.Server
 import com.zeronet.mobile.ui.LocalController
 import com.zeronet.mobile.ui.components.FlagBadge
+import com.zeronet.mobile.ui.components.ServerBadge
 import com.zeronet.mobile.ui.components.IconBadge
 import com.zeronet.mobile.ui.components.RowShape
 import com.zeronet.mobile.ui.components.SectionTitle
@@ -63,6 +64,7 @@ fun HomeRoute() {
     val controller = LocalController.current
     val conn by controller.engine.state.collectAsStateWithLifecycle()
     val stats by controller.engine.stats.collectAsStateWithLifecycle()
+    val race by controller.engine.race.collectAsStateWithLifecycle()
     val settings by controller.settings.settings.collectAsStateWithLifecycle()
     val servers by controller.servers.servers.collectAsStateWithLifecycle()
     val subscriptions by controller.servers.subscriptions.collectAsStateWithLifecycle()
@@ -91,6 +93,7 @@ fun HomeRoute() {
             targetSubscription = targetSubscription?.name,
             targetSubscriptionDelay = targetSubscription?.bestDelay ?: -1,
             profile = settings.profile,
+            race = race,
         ),
         onOrbClick = controller::toggle,
         onRetry = {
@@ -149,7 +152,7 @@ fun ServerPickerSheet(
             item(key = "fastest", contentType = "row") {
                 PickerRow(
                     selected = target == ConnectTarget.Fastest,
-                    leading = { IconBadge(ZeroIcons.Bolt) },
+                    leading = { com.zeronet.mobile.ui.components.LightningBadge() },
                     title = stringResource(R.string.server_fastest),
                     subtitle = stringResource(R.string.server_fastest_hint),
                     trailing = null,
@@ -175,7 +178,7 @@ fun ServerPickerSheet(
                 items(mine, key = { "mine_" + it.key }, contentType = { "row" }) { s ->
                     PickerRow(
                         selected = target == ConnectTarget.Specific(s.key),
-                        leading = { FlagBadge(s.country) },
+                        leading = { ServerBadge(s) },
                         title = serverTitle(context, s, locale),
                         subtitle = if (s.country.isNotEmpty()) countryLabel(context, s.country, locale) else s.protocol.uppercase(Locale.ROOT),
                         trailing = if (s.delayMs >= 0) formatDelay(context, s.delayMs, locale) else null,
@@ -189,7 +192,7 @@ fun ServerPickerSheet(
                 items(favorites, key = { "fav_" + it.key }, contentType = { "row" }) { s ->
                     PickerRow(
                         selected = target == ConnectTarget.Specific(s.key),
-                        leading = { FlagBadge(s.country) },
+                        leading = { ServerBadge(s) },
                         title = serverTitle(context, s, locale),
                         subtitle = countryLabel(context, s.country, locale),
                         trailing = if (s.delayMs >= 0) formatDelay(context, s.delayMs, locale) else null,

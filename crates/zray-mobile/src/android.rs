@@ -907,6 +907,33 @@ pub extern "system" fn Java_com_zeronet_mobile_core_ZrayNative_testLinks<'local>
     )
 }
 
+/// `warpRegister(requestJson, listener): Long`
+///
+/// Gets a free Cloudflare WARP account and looks for servers that work
+/// through it. Events: `{"t":"step","line":…}` as it goes and one
+/// `{"t":"done","ok":…}` with the account's link, or the reason it failed.
+#[no_mangle]
+pub extern "system" fn Java_com_zeronet_mobile_core_ZrayNative_warpRegister<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    request_json: JString<'local>,
+    listener: JObject<'local>,
+) -> jlong {
+    contained(
+        "warpRegister",
+        || 0,
+        || {
+            start_job(
+                &mut env,
+                &request_json,
+                &listener,
+                "warpRegister",
+                zero_discovery::warp_job,
+            )
+        },
+    )
+}
+
 /// `scan(requestJson, listener): Long`
 #[no_mangle]
 pub extern "system" fn Java_com_zeronet_mobile_core_ZrayNative_scan<'local>(

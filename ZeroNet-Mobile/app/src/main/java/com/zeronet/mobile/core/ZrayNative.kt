@@ -44,6 +44,9 @@ object ZrayNative {
     @JvmStatic external fun discover(requestJson: String, listener: NativeListener): Long
     @JvmStatic external fun testLinks(requestJson: String, listener: NativeListener): Long
     @JvmStatic external fun scan(requestJson: String, listener: NativeListener): Long
+    /** `{"proxy": "127.0.0.1:port"?, "direct": bool}` → events `{"t":"step","line"}` and one
+     *  `{"t":"done","ok",…}`: gets a free WARP account and finds servers that work through it. */
+    @JvmStatic external fun warpRegister(requestJson: String, listener: NativeListener): Long
     @JvmStatic external fun cancel(handle: Long)
 
     /** Called from Rust for every outbound socket Zray opens. */
