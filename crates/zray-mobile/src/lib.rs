@@ -686,6 +686,9 @@ fn stats_value() -> Option<serde_json::Value> {
         "up": stats.uploaded.load(Ordering::Relaxed),
         "down": stats.downloaded.load(Ordering::Relaxed),
         "sessions": running.server.active_sessions(),
+        // False while the TUN device is being served or there is none; true
+        // once it has gone, so the host can bring the interface back.
+        "tun_lost": stats.tun_lost(),
         "tags": tags,
         "cdn": stats.cdn_condition(),
         "cdn_notice": stats.cdn_condition().notice(),
