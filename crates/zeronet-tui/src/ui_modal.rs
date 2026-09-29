@@ -50,6 +50,8 @@ impl UiRenderer<'_> {
             ModalState::Update { release, .. } => {
                 (update_dialog_rect(area, release.notes.len()), "UPDATE")
             }
+            ModalState::Warp { phase, .. } => (warp_dialog_rect(area, phase), "WARP"),
+            ModalState::Connection { .. } => (connection_dialog_rect(area), "TEST"),
         }
     }
 
@@ -75,6 +77,8 @@ impl UiRenderer<'_> {
             ModalState::SudoPassword { .. } => "ADMINISTRATOR PASSWORD",
             ModalState::Help { .. } => "KEYBOARD REFERENCE",
             ModalState::Update { .. } => "UPDATE",
+            ModalState::Warp { .. } => "CLOUDFLARE WARP",
+            ModalState::Connection { .. } => "CONNECTION TEST",
             ModalState::None => return,
         };
         let accent = match self.modal_state {
@@ -91,6 +95,11 @@ impl UiRenderer<'_> {
             ModalState::Update { phase, .. } => match phase {
                 crate::modal::UpdatePhase::Installed => self.theme.ok,
                 crate::modal::UpdatePhase::Failed(_) => self.theme.err,
+                _ => self.theme.accent_bright,
+            },
+            ModalState::Warp { phase, .. } => match phase {
+                crate::modal::WarpPhase::Done { .. } => self.theme.ok,
+                crate::modal::WarpPhase::Failed(_) => self.theme.err,
                 _ => self.theme.accent_bright,
             },
             ModalState::QuitConfirmation { .. } | ModalState::Help { .. } => self.theme.accent,
@@ -215,6 +224,8 @@ impl UiRenderer<'_> {
             ModalState::Update { release, phase, .. } => {
                 self.render_update(frame, inner, release, phase)
             }
+            ModalState::Warp { phase, .. } => self.render_warp(frame, inner, phase),
+            ModalState::Connection { checks, .. } => self.render_connection(frame, inner, checks),
             ModalState::None => {}
         }
 
@@ -748,6 +759,520 @@ impl UiRenderer<'_> {
             secondary,
             theme.muted,
         );
+    }
+
+    /// The WARP dialog: what will happen and a question, then what is
+    /// happening, then what happened; or, for a profile that already has an
+    /// account, what it is set to and a list of things to do with it.
+    fn render_warp(&mut self, frame: &mut Frame, inner: Rect, phase: &crate::modal::WarpPhase) {
+        use crate::modal::WarpPhase;
+        let theme = self.theme;
+        let moving = self.caps.animations && self.effects.animations_enabled();
+        let tick = if moving {
+            self.effects.current_tick()
+        } else {
+            0
+        };
+        let created = self.modal_state.created_tick();
+        let hue = match phase {
+            WarpPhase::Done { .. } => theme.ok,
+            WarpPhase::Failed(_) => theme.err,
+            _ => theme.accent_bright,
+        };
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // breathing room
+                Constraint::Length(1), // headline
+                Constraint::Length(1),
+                Constraint::Min(0),    // body
+                Constraint::Length(3), // buttons
+            ])
+            .split(inner);
+
+        let headline = match phase {
+            WarpPhase::Offer => "Get a free Cloudflare WARP account".to_string(),
+            WarpPhase::Working { .. } => "Setting up WARP…".to_string(),
+            WarpPhase::Done { headline, .. } => format!("✔  {headline}"),
+            WarpPhase::Failed(_) => "✖  That did not work".to_string(),
+            WarpPhase::Manage { remark, .. } => {
+                format!(
+                    "WARP  ·  {}",
+                    truncate(remark, chunks[1].width as usize - 10)
+                )
+            }
+        };
+        let len = headline.chars().count();
+        let spans: Vec<Span> = headline
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| {
+                let glow = if moving && matches!(phase, WarpPhase::Working { .. }) {
+                    sweep(tick, i, len, 0.7)
+                } else {
+                    0.0
+                };
+                Span::styled(
+                    ch.to_string(),
+                    Style::default()
+                        .fg(crate::theme::lerp_color(hue, theme.text, glow * 0.85))
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect();
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+            chunks[1],
+        );
+
+        let body = chunks[3].inner(Margin {
+            horizontal: 2,
+            vertical: 0,
+        });
+        let plain = |text: &str, color: Color| {
+            Line::from(Span::styled(text.to_string(), Style::default().fg(color)))
+        };
+        match phase {
+            WarpPhase::Offer => {
+                let lines = vec![
+                    plain(
+                        "Registers this device with Cloudflare for a free, anonymous WARP account. The keys are made here; only their public halves are sent.",
+                        theme.text,
+                    ),
+                    Line::from(""),
+                    plain(
+                        "Then looks for servers that work through it and adds all of it as one profile.",
+                        theme.text,
+                    ),
+                    Line::from(""),
+                    plain(
+                        "Terms: cloudflare.com/application/terms",
+                        theme.muted,
+                    ),
+                ];
+                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), body);
+            }
+            WarpPhase::Working { steps } => {
+                const SPIN: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Min(0),
+                    ])
+                    .split(body);
+                // The key is not known yet, so the row only churns.
+                self.render_cipher(
+                    frame,
+                    rows[0],
+                    rows[1],
+                    "DERIVING KEY",
+                    &CIPHER_PLACEHOLDER.chars().collect::<Vec<_>>(),
+                    tick,
+                    None,
+                    created,
+                    moving,
+                );
+                let room = rows[3].height as usize;
+                let shown = &steps[steps.len().saturating_sub(room)..];
+                let last = shown.len().saturating_sub(1);
+                let lines: Vec<Line> = shown
+                    .iter()
+                    .enumerate()
+                    .map(|(i, step)| {
+                        let (mark, color) = if i == last {
+                            (SPIN[(tick as usize / 2) % SPIN.len()], theme.accent_bright)
+                        } else {
+                            ("✔", theme.ok)
+                        };
+                        Line::from(vec![
+                            Span::styled(format!("{mark}  "), Style::default().fg(color)),
+                            Span::styled(
+                                truncate(step, (rows[3].width as usize).saturating_sub(4)),
+                                Style::default().fg(if i == last {
+                                    theme.text
+                                } else {
+                                    theme.muted
+                                }),
+                            ),
+                        ])
+                    })
+                    .collect();
+                frame.render_widget(Paragraph::new(lines), rows[3]);
+            }
+            WarpPhase::Done {
+                detail,
+                fingerprint,
+                finished_tick,
+                ..
+            } => {
+                let (strip, text) = match fingerprint {
+                    Some(fingerprint) => {
+                        let rows = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([
+                                Constraint::Length(1),
+                                Constraint::Length(1),
+                                Constraint::Length(1),
+                                Constraint::Min(0),
+                            ])
+                            .split(body);
+                        (Some((rows[0], rows[1], fingerprint)), rows[3])
+                    }
+                    None => (None, body),
+                };
+                if let Some((label_row, strip_row, fingerprint)) = strip {
+                    // The key settles left to right; with animation off it is
+                    // simply there.
+                    let template: Vec<char> = fingerprint.chars().collect();
+                    let elapsed = self.effects.current_tick().saturating_sub(*finished_tick);
+                    let locked = if moving {
+                        crate::keyfx::settled(elapsed, template.len())
+                    } else {
+                        template.len()
+                    };
+                    self.render_cipher(
+                        frame,
+                        label_row,
+                        strip_row,
+                        "KEY FINGERPRINT",
+                        &template,
+                        tick,
+                        Some(locked),
+                        created,
+                        moving,
+                    );
+                }
+                frame.render_widget(
+                    Paragraph::new(detail.as_str())
+                        .style(Style::default().fg(theme.text))
+                        .wrap(Wrap { trim: true }),
+                    text,
+                );
+            }
+            WarpPhase::Failed(message) => {
+                frame.render_widget(
+                    Paragraph::new(message.as_str())
+                        .style(Style::default().fg(theme.err))
+                        .wrap(Wrap { trim: true }),
+                    body,
+                );
+            }
+            WarpPhase::Manage {
+                exits,
+                reverse,
+                route,
+                selected,
+                ..
+            } => {
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(2), // what it is set to
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Min(0),
+                    ])
+                    .split(body);
+                let servers = match exits {
+                    0 => "no servers listed".to_string(),
+                    1 => "1 server listed".to_string(),
+                    n => format!("{n} servers listed"),
+                };
+                frame.render_widget(
+                    Paragraph::new(vec![
+                        plain(&format!("Connects by: {route}  ·  {servers}"), theme.muted),
+                        plain(
+                            if *reverse {
+                                "Servers go first; the tunnel alone is the failsafe."
+                            } else {
+                                "The tunnel alone goes first; servers are the failsafe."
+                            },
+                            theme.muted,
+                        ),
+                    ]),
+                    rows[0],
+                );
+                let labels = [
+                    "Find servers that work through this account".to_string(),
+                    if *reverse {
+                        "Go through the tunnel alone first instead".to_string()
+                    } else {
+                        "Go through servers first instead".to_string()
+                    },
+                    "Get a new account".to_string(),
+                ];
+                for (index, label) in labels.iter().enumerate() {
+                    let area = rows[1 + index];
+                    let id = ComponentId::WarpOption(index);
+                    self.interaction.register_hit_box(id, area);
+                    let active = *selected == index || self.interaction.is_hovered(id);
+                    let (marker, style) = if active {
+                        (
+                            "▸ ",
+                            Style::default()
+                                .fg(theme.accent_bright)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        ("  ", Style::default().fg(theme.text))
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Line::from(vec![
+                            Span::styled(marker, style),
+                            Span::styled(label.clone(), style),
+                        ])),
+                        area,
+                    );
+                }
+            }
+        }
+
+        let (primary, primary_color, secondary) = match phase {
+            WarpPhase::Offer => ("Get account (Enter)", theme.accent_bright, "Cancel (Esc)"),
+            WarpPhase::Working { .. } => ("Working…", theme.muted, "Hide (Esc)"),
+            WarpPhase::Done { .. } => ("Connect (Enter)", theme.ok, "Close (Esc)"),
+            WarpPhase::Failed(_) => ("↻ Try again (Enter)", theme.accent_bright, "Close (Esc)"),
+            WarpPhase::Manage { .. } => ("Choose (Enter)", theme.accent_bright, "Close (Esc)"),
+        };
+        self.confirm_cancel_colored(
+            frame,
+            chunks[4],
+            ComponentId::WarpPrimary,
+            primary,
+            primary_color,
+            ComponentId::WarpSecondary,
+            secondary,
+            theme.muted,
+        );
+    }
+
+    /// The connection test: the path with its breaks, one plain sentence about
+    /// what is wrong, and the findings underneath for whoever wants them.
+    fn render_connection(
+        &mut self,
+        frame: &mut Frame,
+        inner: Rect,
+        checks: &[zero_discovery::selftest::Check],
+    ) {
+        use zero_discovery::selftest::{finished, problem, Problem, Status};
+        let theme = self.theme;
+        let moving = self.caps.animations && self.effects.animations_enabled();
+        let tick = if moving {
+            self.effects.current_tick()
+        } else {
+            0
+        };
+        let done = finished(checks);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // breathing room
+                Constraint::Length(crate::path_map::HEIGHT as u16),
+                Constraint::Length(1),
+                Constraint::Length(5), // what is wrong, and what to do
+                Constraint::Min(0),    // the findings
+                Constraint::Length(3), // buttons
+            ])
+            .split(inner);
+
+        // The picture, centred.
+        let picture = crate::path_map::lines(checks, tick, theme, done);
+        frame.render_widget(
+            Paragraph::new(picture).alignment(Alignment::Center),
+            chunks[1],
+        );
+
+        let what = problem(checks);
+        let (headline, follow, color) =
+            if checks.is_empty() || checks.iter().all(|c| c.status == Status::Pending) {
+                ("Starting…".to_string(), None, theme.muted)
+            } else if !done {
+                (
+                    "Checking each step of the way…".to_string(),
+                    None,
+                    theme.muted,
+                )
+            } else {
+                (
+                    crate::path_map::headline(what).to_string(),
+                    crate::path_map::action(what).map(str::to_string),
+                    if what == Problem::None {
+                        theme.ok
+                    } else {
+                        theme.text
+                    },
+                )
+            };
+        let mut words = vec![Line::from(Span::styled(
+            headline,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))];
+        if let Some(follow) = follow {
+            words.push(Line::from(Span::styled(
+                follow,
+                Style::default().fg(theme.muted),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(words).wrap(Wrap { trim: true }),
+            chunks[3].inner(Margin {
+                horizontal: 2,
+                vertical: 0,
+            }),
+        );
+
+        // The findings, one row each: a dot for the state, the name, the detail.
+        let rows: Vec<Line> = checks
+            .iter()
+            .map(|check| {
+                let (mark, mark_color) = match check.status {
+                    Status::Ok => ("●", theme.ok),
+                    Status::Warn => ("●", theme.warn),
+                    Status::Bad => ("●", theme.err),
+                    Status::Running => (if (tick / 3) % 2 == 0 { "◐" } else { "◑" }, theme.accent),
+                    Status::Pending | Status::Skipped => ("○", theme.border),
+                };
+                let room = (chunks[4].width as usize).saturating_sub(4 + 24);
+                Line::from(vec![
+                    Span::styled(format!("  {mark} "), Style::default().fg(mark_color)),
+                    Span::styled(
+                        format!("{:<22}", check.id.name()),
+                        Style::default().fg(theme.text),
+                    ),
+                    Span::styled(
+                        truncate(&check.detail, room),
+                        Style::default().fg(if check.status == Status::Bad {
+                            theme.err
+                        } else {
+                            theme.muted
+                        }),
+                    ),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(rows), chunks[4]);
+
+        let (primary, primary_color) = if done {
+            ("Run again (Enter)", theme.accent_bright)
+        } else {
+            ("Testing…", theme.muted)
+        };
+        self.confirm_cancel_colored(
+            frame,
+            chunks[5],
+            ComponentId::TestPrimary,
+            primary,
+            primary_color,
+            ComponentId::TestSecondary,
+            "Close (Esc)",
+            theme.muted,
+        );
+    }
+
+    /// A label and, under it, the key row: churning cipher text that settles
+    /// left to right into `template` once `locked` says how far it has got.
+    #[allow(clippy::too_many_arguments)]
+    fn render_cipher(
+        &self,
+        frame: &mut Frame,
+        label_area: Rect,
+        strip_area: Rect,
+        label: &str,
+        template: &[char],
+        tick: u64,
+        locked: Option<usize>,
+        seed: u64,
+        moving: bool,
+    ) {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                label,
+                Style::default()
+                    .fg(self.theme.muted)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center),
+            label_area,
+        );
+        // Still frame when animation is off: the settled key, or plain dots.
+        let tick = if moving { tick } else { 0 };
+        let line = self.cipher_line(template, tick, locked, seed, moving && locked.is_none());
+        frame.render_widget(
+            Paragraph::new(line).alignment(Alignment::Center),
+            strip_area,
+        );
+    }
+
+    /// The key row as coloured spans. Settled cells are green with a warm
+    /// glow near the front; the front is lit white; the churn shimmers in dim
+    /// gold and blue; the Chinese characters are their own violet-red.
+    fn cipher_line(
+        &self,
+        template: &[char],
+        tick: u64,
+        locked: Option<usize>,
+        seed: u64,
+        sweeping: bool,
+    ) -> Line<'static> {
+        use crate::keyfx::{frame, mix, Kind, STEP_TICKS};
+        let theme = self.theme;
+        let cells = frame(template, tick, locked, seed);
+        let mut columns = 0usize;
+        let mut front = None;
+        for cell in &cells {
+            if cell.kind == Kind::Front {
+                front = Some(columns);
+            }
+            columns += cell.width();
+        }
+        let total = columns;
+        let mut column = 0usize;
+        let mut spans = Vec::with_capacity(cells.len());
+        for cell in cells {
+            let style = match cell.kind {
+                Kind::Gap => Style::default(),
+                Kind::Front => Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                Kind::Locked => {
+                    let distance = front.map_or(usize::MAX, |f| f.saturating_sub(column));
+                    let glow = (1.0 - distance as f64 / 6.0).clamp(0.0, 1.0);
+                    let mut style =
+                        Style::default().fg(crate::theme::lerp_color(theme.ok, theme.text, glow));
+                    if glow > 0.4 {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    style
+                }
+                Kind::Churn => {
+                    let shimmer =
+                        (mix(seed ^ 0x51, column as u64, tick / STEP_TICKS) % 100) as f64 / 100.0;
+                    let band = if sweeping {
+                        sweep(tick, column, total, 0.9)
+                    } else {
+                        0.0
+                    };
+                    let base = if cell.ch.is_ascii_hexdigit() {
+                        theme.accent_dim
+                    } else {
+                        crate::theme::lerp_color(theme.info, theme.bg, 0.35)
+                    };
+                    Style::default().fg(crate::theme::lerp_color(
+                        base,
+                        theme.accent_bright,
+                        (shimmer * 0.5 + band * 0.6).min(1.0),
+                    ))
+                }
+                Kind::Wide => Style::default()
+                    .fg(crate::theme::lerp_color(theme.info, theme.err, 0.55))
+                    .add_modifier(Modifier::BOLD),
+            };
+            column += cell.width();
+            spans.push(Span::styled(cell.ch.to_string(), style));
+        }
+        Line::from(spans)
     }
 
     /// A progress bar with eighth-cell precision, shading from the dim to
@@ -1401,6 +1926,47 @@ fn update_dialog_rect(area: Rect, notes: usize) -> Rect {
     let notes_rows = if notes > 0 { notes as u16 + 2 } else { 0 };
     let want_h = (13 + notes_rows).min(area.height.saturating_sub(2));
     let want_w = 68.min(area.width.saturating_sub(4));
+    Rect {
+        x: area.x + area.width.saturating_sub(want_w) / 2,
+        y: area.y + area.height.saturating_sub(want_h) / 2,
+        width: want_w,
+        height: want_h,
+    }
+}
+
+/// The row that churns while the key is being made: eight groups of four.
+const CIPHER_PLACEHOLDER: &str = "0000 0000 0000 0000 0000 0000 0000 0000";
+
+/// The WARP dialog, sized to what it shows and never larger than the screen.
+fn warp_dialog_rect(area: Rect, phase: &crate::modal::WarpPhase) -> Rect {
+    use crate::modal::WarpPhase;
+    // Borders 2, breathing room and headline 3, buttons 3, and the body.
+    let body = match phase {
+        WarpPhase::Offer => 9,
+        WarpPhase::Working { .. } => 10,
+        WarpPhase::Done {
+            fingerprint: Some(_),
+            ..
+        } => 9,
+        WarpPhase::Done { .. } | WarpPhase::Failed(_) => 6,
+        WarpPhase::Manage { .. } => 7,
+    };
+    let want_h = (8 + body).min(area.height.saturating_sub(2));
+    let want_w = 72.min(area.width.saturating_sub(4));
+    Rect {
+        x: area.x + area.width.saturating_sub(want_w) / 2,
+        y: area.y + area.height.saturating_sub(want_h) / 2,
+        width: want_w,
+        height: want_h,
+    }
+}
+
+/// The connection test: as wide as its picture, as tall as its rows.
+fn connection_dialog_rect(area: Rect) -> Rect {
+    // Borders 2, breathing room 1, picture, gap 1, words 5, five findings, buttons 3.
+    let want_h =
+        (2 + 1 + crate::path_map::HEIGHT as u16 + 1 + 5 + 5 + 3).min(area.height.saturating_sub(2));
+    let want_w = (crate::path_map::WIDTH as u16 + 8).min(area.width.saturating_sub(4));
     Rect {
         x: area.x + area.width.saturating_sub(want_w) / 2,
         y: area.y + area.height.saturating_sub(want_h) / 2,

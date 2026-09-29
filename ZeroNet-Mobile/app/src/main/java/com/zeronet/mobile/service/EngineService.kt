@@ -59,6 +59,8 @@ class EngineService : Service() {
             }
             launch { Engine.serversChanged.collect { broadcast(Ipc.SERVERS_CHANGED, null) } }
             launch { Engine.diagnosis.collect { broadcast(Ipc.DIAGNOSIS, Ipc.diagnosisToJson(it)) } }
+            launch { Engine.race.drop(1).collect { broadcast(Ipc.RACE, Ipc.raceToJson(it)) } }
+            launch { Engine.warp.collect { broadcast(Ipc.WARP, Ipc.warpToJson(it)) } }
         }
     }
 
@@ -95,6 +97,7 @@ class EngineService : Service() {
                     // Bring the new client up to date immediately.
                     reply(client, Ipc.STATE, Ipc.stateToJson(Engine.state.value))
                     reply(client, Ipc.SCAN, Ipc.scanToJson(Engine.scan.value))
+                    Engine.race.value.takeIf { it.lanes.isNotEmpty() }?.let { reply(client, Ipc.RACE, Ipc.raceToJson(it)) }
                 }
                 Ipc.UNREGISTER -> msg.replyTo?.let { client ->
                     clientsList.removeAll { it.binder == client.binder }
@@ -118,6 +121,8 @@ class EngineService : Service() {
                 Ipc.SCAN_START -> Engine.startScan(json?.let { JSONObject(it).optInt("count", 2000) } ?: 2000)
                 Ipc.SCAN_STOP -> Engine.stopScan()
                 Ipc.DIAGNOSE -> Engine.diagnose()
+                Ipc.WARP_START -> Engine.warpStart()
+                Ipc.WARP_CANCEL -> Engine.warpCancel()
                 Ipc.IMPORT -> {
                     val replyTo = msg.replyTo
                     val text = json.orEmpty()

@@ -387,13 +387,16 @@ mod tests {
 
     #[tokio::test]
     async fn ping_returns_none_for_a_closed_port() {
-        // Bind and immediately drop, so the port is almost certainly free.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        // Bound but never listening: connecting is refused, and no test
+        // running in parallel can be handed this port in the meantime (a
+        // dropped listener's port can be, which made this test flaky).
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = socket.local_addr().unwrap().port();
 
         let ms = tcp_ping("127.0.0.1", port, Duration::from_millis(300)).await;
         assert!(ms.is_none());
+        drop(socket);
     }
 
     #[tokio::test]

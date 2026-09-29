@@ -151,8 +151,8 @@ fun lerpLongitude(from: Float, to: Float, t: Float): Float {
     return from + delta * t
 }
 
-/** Tehran for Iran (most users are near it); the country's label point otherwise. */
-private val CAPITAL_OVERRIDES = mapOf("IR" to LatLon(35.69f, 51.39f))
+/** A coarse point for Tehran, standing for Iran (most users are near it): a fixed public value, never read from the device. The country's label point otherwise. */
+private val CAPITAL_OVERRIDES = mapOf("IR" to LatLon(35.7f, 51.4f))
 
 /**
  * Where the user is, without asking for location: the country of the mobile

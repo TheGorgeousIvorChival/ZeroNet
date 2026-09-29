@@ -98,6 +98,16 @@ pub enum ComponentId {
     UpdatePrimary,
     /// The update dialog's second button (later, hide).
     UpdateSecondary,
+    /// The WARP dialog's main button (get an account, connect, try again).
+    WarpPrimary,
+    /// The WARP dialog's second button (cancel, hide, close).
+    WarpSecondary,
+    /// One entry of the WARP dialog's manage list, by index.
+    WarpOption(usize),
+    /// The connection test's main button (run again).
+    TestPrimary,
+    /// The connection test's second button (close).
+    TestSecondary,
     SettingSystemProxyCycle,
     SettingPacPort,
     /// The heading that folds the advanced settings.

@@ -97,6 +97,82 @@ pub enum ModalState {
         phase: UpdatePhase,
         created_tick: u64,
     },
+    /// Cloudflare WARP: getting an account, and managing one.
+    Warp {
+        phase: WarpPhase,
+        created_tick: u64,
+    },
+    /// "Test my connection": what this network does to plain traffic, drawn
+    /// as a path with the tunnel around the filter.
+    Connection {
+        checks: Vec<zero_discovery::selftest::Check>,
+        created_tick: u64,
+    },
+}
+
+/// Where the WARP dialog stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WarpPhase {
+    /// Nothing done yet: says what will happen, and asks.
+    Offer,
+    /// Running. `steps` are what has happened so far, oldest first; the last
+    /// one is what is being done now.
+    Working { steps: Vec<String> },
+    /// Finished: the profile it made or changed, and what to tell the person.
+    Done {
+        profile: i64,
+        headline: String,
+        detail: String,
+        /// The account's public fingerprint, revealed by the key effect.
+        fingerprint: Option<String>,
+        /// The tick the account became ready; the reveal counts from it.
+        finished_tick: u64,
+    },
+    /// Did not work: one sentence saying why and what to do next.
+    Failed(String),
+    /// An existing WARP profile and what can be done with it.
+    Manage {
+        profile: i64,
+        remark: String,
+        /// Servers listed as exits.
+        exits: usize,
+        /// Exits are tried first.
+        reverse: bool,
+        /// `auto`, `wireguard`, `masque-h2` or `masque-h3`.
+        route: String,
+        /// The highlighted option, an index into [`WARP_OPTIONS`].
+        selected: usize,
+    },
+}
+
+/// How many entries the manage list has: find servers, flip the order, get a
+/// new account.
+pub const WARP_OPTIONS: usize = 3;
+
+/// What the WARP job says before it has done anything; the first real step
+/// replaces it.
+pub const WARP_FIRST_STEP: &str = "Getting ready…";
+/// The most steps kept; older ones scroll away.
+const WARP_STEPS_KEPT: usize = 40;
+
+/// Add a line of progress to `steps`: not twice in a row, replacing the
+/// placeholder the job starts with, and never growing without bound.
+pub fn push_warp_step(steps: &mut Vec<String>, line: String) {
+    if steps.last() == Some(&line) {
+        return;
+    }
+    if steps.len() == 1 && steps[0] == WARP_FIRST_STEP {
+        steps.clear();
+    }
+    steps.push(line);
+    if steps.len() > WARP_STEPS_KEPT {
+        steps.remove(0);
+    }
+}
+
+/// The manage list's highlight after moving `delta` entries; it wraps.
+pub fn move_warp_selection(selected: usize, delta: i32) -> usize {
+    (selected as i32 + delta).rem_euclid(WARP_OPTIONS as i32) as usize
 }
 
 /// Where an update stands, as the update dialog shows it.
@@ -171,7 +247,9 @@ impl ModalState {
             | ModalState::SudoPassword { created_tick, .. }
             | ModalState::Help { created_tick, .. }
             | ModalState::ImageView { created_tick, .. }
-            | ModalState::Update { created_tick, .. } => *created_tick,
+            | ModalState::Update { created_tick, .. }
+            | ModalState::Warp { created_tick, .. }
+            | ModalState::Connection { created_tick, .. } => *created_tick,
             ModalState::None => 0,
         }
     }
@@ -228,6 +306,8 @@ impl ModalState {
             ModalState::SudoPassword { .. } => "ADMINISTRATOR PASSWORD",
             ModalState::Help { .. } => "KEYBOARD REFERENCE",
             ModalState::Update { .. } => "UPDATE",
+            ModalState::Warp { .. } => "CLOUDFLARE WARP",
+            ModalState::Connection { .. } => "CONNECTION TEST",
         }
     }
 }
@@ -321,6 +401,14 @@ mod tests {
                 scroll: 0,
                 created_tick: 9,
             },
+            ModalState::Warp {
+                phase: WarpPhase::Offer,
+                created_tick: 9,
+            },
+            ModalState::Connection {
+                checks: Vec::new(),
+                created_tick: 9,
+            },
         ];
 
         for modal in variants {
@@ -365,5 +453,28 @@ mod tests {
             panic!()
         };
         assert_eq!(*purpose, TextPurpose::RenameProfile(7));
+    }
+
+    #[test]
+    fn warp_steps_replace_the_placeholder_skip_repeats_and_stay_bounded() {
+        let mut steps = vec![WARP_FIRST_STEP.to_string()];
+        push_warp_step(&mut steps, "Asking Cloudflare…".into());
+        assert_eq!(steps, ["Asking Cloudflare…"]);
+        push_warp_step(&mut steps, "Asking Cloudflare…".into());
+        push_warp_step(&mut steps, "Account created.".into());
+        assert_eq!(steps.len(), 2);
+        for n in 0..100 {
+            push_warp_step(&mut steps, format!("step {n}"));
+        }
+        assert_eq!(steps.len(), 40);
+        assert_eq!(steps.last().unwrap(), "step 99");
+    }
+
+    #[test]
+    fn the_manage_list_wraps_in_both_directions() {
+        assert_eq!(move_warp_selection(0, -1), WARP_OPTIONS - 1);
+        assert_eq!(move_warp_selection(WARP_OPTIONS - 1, 1), 0);
+        assert_eq!(move_warp_selection(1, 1), 2);
+        assert_eq!(move_warp_selection(1, -1), 0);
     }
 }

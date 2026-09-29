@@ -46,6 +46,8 @@ pub enum MenuAction {
     ImportFromFile,
     ExportSelected,
     NewProfile,
+    Warp,
+    TestConnection,
     ApplyEndpoint,
     Settings,
     Help,
@@ -74,6 +76,8 @@ impl MenuAction {
             MenuAction::ImportFromFile => "Import from file…",
             MenuAction::ExportSelected => "Export selected…",
             MenuAction::NewProfile => "New profile…",
+            MenuAction::Warp => "Cloudflare WARP…",
+            MenuAction::TestConnection => "Test my connection…",
             MenuAction::ApplyEndpoint => "Use this endpoint",
             MenuAction::Settings => "Settings",
             MenuAction::Help => "Keyboard reference",
@@ -101,6 +105,8 @@ impl MenuAction {
             MenuAction::ImportFromFile => "^O",
             MenuAction::ExportSelected => "^E",
             MenuAction::NewProfile => "^N",
+            MenuAction::Warp => "W",
+            MenuAction::TestConnection => "T",
             MenuAction::Settings => "^,",
             MenuAction::Help => "F1",
             MenuAction::SetProxyManual => "local",
@@ -166,6 +172,8 @@ impl ContextMenu {
                     Separator,
                     Action(Duplicate),
                     Action(Paste),
+                    Action(Warp),
+                    Action(TestConnection),
                 ];
                 if has_selection {
                     v.push(Action(ExportSelected));
@@ -201,6 +209,8 @@ impl ContextMenu {
             ],
             MenuTarget::Background => vec![
                 Action(NewProfile),
+                Action(Warp),
+                Action(TestConnection),
                 Action(Paste),
                 Action(ImportFromFile),
                 Separator,
@@ -583,6 +593,8 @@ mod tests {
             MenuAction::ImportFromFile,
             MenuAction::ExportSelected,
             MenuAction::NewProfile,
+            MenuAction::Warp,
+            MenuAction::TestConnection,
             MenuAction::ApplyEndpoint,
             MenuAction::Settings,
             MenuAction::Help,

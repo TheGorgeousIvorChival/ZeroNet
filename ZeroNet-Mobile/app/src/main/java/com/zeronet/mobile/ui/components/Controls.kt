@@ -300,9 +300,7 @@ fun <T> Segmented(
 ) {
     val c = ZeroTheme.colors
     val index = options.indexOf(selected).coerceAtLeast(0)
-    val pos = remember { Animatable(index.toFloat()) }
-    val spec = Motion.expressive<Float>()
-    LaunchedEffect(index) { pos.animateTo(index.toFloat(), spec) }
+    val blob = rememberBlob(index)
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     Box(
         modifier
@@ -317,20 +315,14 @@ fun <T> Segmented(
             Modifier
                 .matchParentSize()
                 .drawBehind {
-                    val w = size.width / n
-                    val x = if (rtl) size.width - w * (pos.value + 1) else w * pos.value
-                    drawRoundRect(
+                    drawBlob(
+                        blob = blob,
+                        count = n,
+                        area = androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height),
+                        gap = 0f,
                         color = c.surface,
-                        topLeft = Offset(x, 0f),
-                        size = Size(w, size.height),
-                        cornerRadius = CornerRadius(size.height / 2, size.height / 2),
-                    )
-                    drawRoundRect(
-                        color = c.border.copy(alpha = 0.6f),
-                        topLeft = Offset(x, 0f),
-                        size = Size(w, size.height),
-                        cornerRadius = CornerRadius(size.height / 2, size.height / 2),
-                        style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx()),
+                        mirrored = rtl,
+                        outline = c.border.copy(alpha = 0.6f),
                     )
                 },
         )

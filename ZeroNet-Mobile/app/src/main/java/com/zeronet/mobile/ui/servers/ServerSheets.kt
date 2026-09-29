@@ -47,7 +47,7 @@ import com.zeronet.mobile.data.Subscription
 import com.zeronet.mobile.model.ImportResult
 import com.zeronet.mobile.model.Server
 import com.zeronet.mobile.ui.components.Badge
-import com.zeronet.mobile.ui.components.FlagBadge
+import com.zeronet.mobile.ui.components.ServerBadge
 import com.zeronet.mobile.ui.components.Hairline
 import com.zeronet.mobile.ui.components.IconAction
 import com.zeronet.mobile.ui.components.PrimaryButton
@@ -133,7 +133,7 @@ private fun ColumnScope.DetailContent(
             .padding(horizontal = 24.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            FlagBadge(s.country, size = 56.dp, modifier = Modifier.graphicsLayer { scaleX = flagScale.value; scaleY = flagScale.value })
+            ServerBadge(s, size = 56.dp, modifier = Modifier.graphicsLayer { scaleX = flagScale.value; scaleY = flagScale.value })
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -321,6 +321,7 @@ fun ImportSheet(
     onImport: suspend (String) -> ImportResult,
     onAddSubscription: (name: String, url: String) -> Unit,
     readClipboard: () -> String,
+    onWarp: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val title = stringResource(R.string.import_title)
@@ -390,6 +391,8 @@ fun ImportSheet(
                     Modifier.fillMaxWidth(),
                     icon = ZeroIcons.Qr,
                 )
+                Spacer(Modifier.height(8.dp))
+                TonalButton(stringResource(R.string.warp_open), onWarp, Modifier.fillMaxWidth())
                 Spacer(Modifier.height(12.dp))
                 if (mode == ImportMode.Links) {
                     ZeroTextField(

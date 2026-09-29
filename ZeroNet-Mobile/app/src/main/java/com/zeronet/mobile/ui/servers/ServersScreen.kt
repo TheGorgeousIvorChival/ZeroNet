@@ -69,6 +69,7 @@ import com.zeronet.mobile.model.Server
 import com.zeronet.mobile.ui.components.Badge
 import com.zeronet.mobile.ui.components.CardShape
 import com.zeronet.mobile.ui.components.FlagBadge
+import com.zeronet.mobile.ui.components.ServerBadge
 import com.zeronet.mobile.ui.components.IconAction
 import com.zeronet.mobile.ui.components.IconBadge
 import com.zeronet.mobile.ui.components.PingBars
@@ -406,7 +407,7 @@ fun ServerRow(server: Server, active: Boolean, actions: ServersActions, modifier
             .padding(start = if (indent) 24.dp else 8.dp, end = 0.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FlagBadge(server.country, size = if (indent) 32.dp else 40.dp)
+        ServerBadge(server, size = if (indent) 32.dp else 40.dp)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.titleSmall, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -8,10 +8,16 @@ import com.zeronet.mobile.model.DiscoveryProgress
 import com.zeronet.mobile.model.DiscoveryStage
 import com.zeronet.mobile.model.FailReason
 import com.zeronet.mobile.model.ImportResult
+import com.zeronet.mobile.model.LaneFail
+import com.zeronet.mobile.model.LaneOutcome
+import com.zeronet.mobile.model.RaceLane
+import com.zeronet.mobile.model.RaceState
 import com.zeronet.mobile.model.ScanResult
 import com.zeronet.mobile.model.ScanState
 import com.zeronet.mobile.model.Server
 import com.zeronet.mobile.model.TrafficStats
+import com.zeronet.mobile.model.WarpPhase
+import com.zeronet.mobile.model.WarpState
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -39,6 +45,8 @@ object Ipc {
     const val ADD_SUBSCRIPTION = 11
     const val REMOVE_SUBSCRIPTION = 12
     const val DIAGNOSE = 13
+    const val WARP_START = 14
+    const val WARP_CANCEL = 15
 
     // engine → UI
     const val STATE = 101
@@ -49,19 +57,22 @@ object Ipc {
     const val TEST_PROGRESS = 106
     const val REFRESH_STATE = 107
     const val DIAGNOSIS = 108
+    const val WARP = 109
+    const val RACE = 110
 
     // ---------------------------------------------------------------- server
 
     fun serverToJson(s: Server): JSONObject = JSONObject()
         .put("key", s.key).put("link", s.link).put("name", s.name).put("protocol", s.protocol)
         .put("transport", s.transport).put("security", s.security).put("host", s.host).put("port", s.port)
-        .put("country", s.country).put("source", s.source).put("favorite", s.favorite).put("delay", s.delayMs)
+        .put("country", s.country).put("source", s.source).put("favorite", s.favorite).put("delay", s.delayMs).put("fp", s.fingerprint)
 
     fun serverFromJson(o: JSONObject): Server = Server(
         key = o.optString("key"), link = o.optString("link"), name = o.optString("name"),
         protocol = o.optString("protocol"), transport = o.optString("transport"), security = o.optString("security"),
         host = o.optString("host"), port = o.optInt("port"), country = o.optString("country"),
         source = o.optString("source"), favorite = o.optBoolean("favorite"), delayMs = o.optInt("delay", -1),
+        fingerprint = o.optString("fp"),
     )
 
     // ----------------------------------------------------------------- state
@@ -101,12 +112,12 @@ object Ipc {
 
     fun progressToJson(p: DiscoveryProgress): JSONObject = JSONObject()
         .put("stage", p.stage.name).put("c", p.candidates).put("td", p.tcpDone).put("to", p.tcpOpen)
-        .put("rd", p.realDone).put("a", p.alive)
+        .put("rd", p.realDone).put("a", p.alive).put("m", p.method)
 
     fun progressFromJson(o: JSONObject): DiscoveryProgress = DiscoveryProgress(
         stage = DiscoveryStage.entries.firstOrNull { it.name == o.optString("stage") } ?: DiscoveryStage.History,
         candidates = o.optInt("c"), tcpDone = o.optInt("td"), tcpOpen = o.optInt("to"),
-        realDone = o.optInt("rd"), alive = o.optInt("a"),
+        realDone = o.optInt("rd"), alive = o.optInt("a"), method = o.optString("m"),
     )
 
     // ----------------------------------------------------------------- stats
@@ -150,6 +161,69 @@ object Ipc {
     fun importFromJson(text: String): ImportResult {
         val o = JSONObject(text)
         return ImportResult(o.optInt("a"), o.optInt("d"), o.optInt("r"), if (o.isNull("e")) null else o.optString("e"))
+    }
+
+    // ------------------------------------------------------------------ race
+
+    private val outcomeWords = mapOf(
+        "waiting" to LaneOutcome.Waiting, "trying" to LaneOutcome.Trying, "won" to LaneOutcome.Won,
+        "lost" to LaneOutcome.Lost, "skipped" to LaneOutcome.Skipped,
+    )
+    private val failWords = mapOf(
+        "no_answer" to LaneFail.NoAnswer, "refused" to LaneFail.Refused, "no_traffic" to LaneFail.NoTraffic,
+        "beaten" to LaneFail.Beaten, "other" to LaneFail.Other,
+    )
+
+    /** The race as the core reports it (`stats().race`) and as it crosses the process boundary. */
+    fun raceFromJson(o: JSONObject): RaceState {
+        val arr = o.optJSONArray("lanes") ?: JSONArray()
+        return RaceState(
+            serial = o.optLong("serial"), done = o.optBoolean("done", true), nowMs = o.optInt("now"),
+            lanes = List(arr.length()) { i ->
+                arr.getJSONObject(i).let { l ->
+                    RaceLane(
+                        route = l.optString("r"),
+                        outcome = outcomeWords[l.optString("s")] ?: LaneOutcome.Skipped,
+                        fail = failWords[l.optString("f")],
+                        startMs = l.optInt("a"), endMs = l.optInt("b"),
+                    )
+                }
+            },
+        )
+    }
+
+    fun raceToJson(r: RaceState): String = JSONObject()
+        .put("serial", r.serial).put("done", r.done).put("now", r.nowMs)
+        .put(
+            "lanes",
+            JSONArray().also { a ->
+                r.lanes.forEach { l ->
+                    a.put(
+                        JSONObject().put("r", l.route).put("s", outcomeWords.entries.first { it.value == l.outcome }.key)
+                            .put("a", l.startMs).put("b", l.endMs)
+                            .also { o -> l.fail?.let { f -> o.put("f", failWords.entries.first { it.value == f }.key) } },
+                    )
+                }
+            },
+        )
+        .toString()
+
+    // ------------------------------------------------------------------ warp
+
+    fun warpToJson(w: WarpState): String = JSONObject()
+        .put("p", w.phase.name).put("steps", JSONArray(w.steps)).put("fp", w.fingerprint)
+        .put("n", w.servers).put("route", w.route).put("err", w.error)
+        .toString()
+
+    fun warpFromJson(text: String): WarpState {
+        val o = JSONObject(text)
+        val steps = o.optJSONArray("steps") ?: JSONArray()
+        return WarpState(
+            phase = WarpPhase.entries.firstOrNull { it.name == o.optString("p") } ?: WarpPhase.Idle,
+            steps = List(steps.length()) { steps.optString(it) },
+            fingerprint = o.optString("fp"), servers = o.optInt("n"),
+            route = o.optString("route"), error = o.optString("err"),
+        )
     }
 
     // ------------------------------------------------------------- self-test

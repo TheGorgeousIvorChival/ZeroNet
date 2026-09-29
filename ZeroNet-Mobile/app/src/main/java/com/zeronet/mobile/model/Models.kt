@@ -31,6 +31,8 @@ data class Server(
     val failCount: Int = 0,
     /** Why the last test failed, as the core reported it; null after a success. */
     val lastError: String? = null,
+    /** For a WARP account, the fingerprint of its keys, which is drawn as a small picture; "" for every other link. */
+    val fingerprint: String = "",
 ) {
     val isUser: Boolean get() = source == SOURCE_USER || source.startsWith(SOURCE_SUB_PREFIX)
 
@@ -80,6 +82,7 @@ data class Server(
             port = info.optInt("port"),
             country = info.optString("country").uppercase(),
             source = source,
+            fingerprint = info.optString("fp"),
         )
     }
 }
@@ -124,6 +127,8 @@ data class DiscoveryProgress(
     val tcpOpen: Int = 0,
     val realDone: Int = 0,
     val alive: Int = 0,
+    /** The way being tried when the mode has several (see `Ladder`): its id, or "" when there is one. */
+    val method: String = "",
 )
 
 /** The connection as the UI shows it. */
@@ -210,6 +215,49 @@ enum class CheckStatus { Pending, Running, Ok, Warn, Bad, Skipped }
  */
 @Immutable
 data class DiagCheck(val id: String, val status: CheckStatus, val detail: String = "")
+
+/** How one route of a WARP race ended, as the core reports it. */
+enum class LaneOutcome { Waiting, Trying, Won, Lost, Skipped }
+
+/** Why a route lost. */
+enum class LaneFail { NoAnswer, Refused, NoTraffic, Beaten, Other }
+
+/** One route in a race; times are milliseconds since the race began. */
+@Immutable
+data class RaceLane(
+    /** `wireguard`, `masque-h2` or `masque-h3`. */
+    val route: String,
+    val outcome: LaneOutcome,
+    val fail: LaneFail? = null,
+    val startMs: Int = 0,
+    val endMs: Int = 0,
+)
+
+/** The last route race of a WARP account: which routes tried, which won, and why the rest did not. */
+@Immutable
+data class RaceState(
+    val serial: Long = 0,
+    val done: Boolean = true,
+    val nowMs: Int = 0,
+    val lanes: List<RaceLane> = emptyList(),
+)
+
+/** Where a Cloudflare WARP account request stands. */
+enum class WarpPhase { Idle, Working, Done, Failed }
+
+/**
+ * The WARP account request: the steps so far, and on success the fingerprint
+ * of the new keys (their public halves, hashed), which the sheet reveals.
+ */
+@Immutable
+data class WarpState(
+    val phase: WarpPhase = WarpPhase.Idle,
+    val steps: List<String> = emptyList(),
+    val fingerprint: String = "",
+    val servers: Int = 0,
+    val route: String = "",
+    val error: String = "",
+)
 
 @Immutable
 data class Diagnosis(

@@ -51,6 +51,19 @@ fun FlagBadge(country: String, modifier: Modifier = Modifier, size: Dp = 40.dp) 
     }
 }
 
+/**
+ * The badge for a server: a WARP account's picture (from its fingerprint), and
+ * for every other server its country's flag.
+ */
+@Composable
+fun ServerBadge(server: com.zeronet.mobile.model.Server, modifier: Modifier = Modifier, size: Dp = 40.dp) {
+    if (server.fingerprint.isNotEmpty()) {
+        com.zeronet.mobile.ui.effects.GlyphBadge(server.fingerprint, modifier, size)
+    } else {
+        FlagBadge(server.country, modifier, size)
+    }
+}
+
 /** A round badge with an icon (used for "Fastest"). */
 @Composable
 fun IconBadge(icon: ImageVector, modifier: Modifier = Modifier, size: Dp = 40.dp, tint: androidx.compose.ui.graphics.Color = ZeroTheme.colors.accent) {

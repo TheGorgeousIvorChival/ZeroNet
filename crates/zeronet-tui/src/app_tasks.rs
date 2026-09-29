@@ -126,6 +126,12 @@ pub(crate) enum BgEvent {
         count: usize,
         result: Result<Option<String>, String>,
     },
+    /// A line of progress from the running WARP job.
+    WarpProgress(String),
+    /// The WARP job finished: what it made, or why it could not.
+    WarpFinished(Result<crate::app_warp::WarpDone, String>),
+    /// A check of the connection test started or finished.
+    TestProgress(zero_discovery::selftest::Check),
 }
 
 /// Bookkeeping for the jobs above, kept in one field of the app.
@@ -151,6 +157,15 @@ pub(crate) struct Background {
     /// running alongside it.
     sweep: Option<JoinHandle<()>>,
     pub(crate) feeds_in_flight: HashSet<i64>,
+    /// A WARP job is running; asking for another shows this one.
+    pub(crate) warp_in_flight: bool,
+    /// The profile the running (or last) WARP job is for, if it is not making
+    /// a new account: what "try again" repeats.
+    pub(crate) warp_target: Option<i64>,
+    /// What the running WARP job has done so far, for the dialog.
+    pub(crate) warp_steps: Vec<String>,
+    /// The connection test is running; asking for another shows this one.
+    pub(crate) test_in_flight: bool,
     feed_attempts: HashMap<i64, Instant>,
     /// The tunnel watchdog: cadence, failure counts and the dead list.
     pub(crate) health: TunnelWatch,
@@ -184,6 +199,10 @@ impl Background {
             ping_flush: None,
             sweep: None,
             feeds_in_flight: HashSet::new(),
+            warp_in_flight: false,
+            warp_target: None,
+            warp_steps: Vec::new(),
+            test_in_flight: false,
             feed_attempts: HashMap::new(),
             health: TunnelWatch::new(),
             health_deadline: None,
@@ -459,6 +478,18 @@ impl App<'_> {
             BgEvent::CrowdReported { count, result } => {
                 self.on_crowd_reported(count, result);
                 false
+            }
+            BgEvent::WarpProgress(line) => {
+                self.on_warp_progress(line);
+                true
+            }
+            BgEvent::WarpFinished(result) => {
+                self.on_warp_finished(result);
+                true
+            }
+            BgEvent::TestProgress(check) => {
+                self.on_test_progress(check);
+                true
             }
             BgEvent::Terminate(name) => {
                 tracing::info!(signal = name, "terminating");

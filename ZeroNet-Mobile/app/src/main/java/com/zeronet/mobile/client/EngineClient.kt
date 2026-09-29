@@ -58,6 +58,12 @@ class EngineClient private constructor(private val context: Context) {
     val testProgress: StateFlow<Pair<Int, Int>?> = _testProgress.asStateFlow()
 
     /** The latest connection self-test (see `Engine.diagnose`). */
+    private val _warp = MutableStateFlow(com.zeronet.mobile.model.WarpState())
+    val warp: StateFlow<com.zeronet.mobile.model.WarpState> = _warp.asStateFlow()
+
+    private val _race = MutableStateFlow(com.zeronet.mobile.model.RaceState())
+    val race: StateFlow<com.zeronet.mobile.model.RaceState> = _race.asStateFlow()
+
     private val _diagnosis = MutableStateFlow(com.zeronet.mobile.model.Diagnosis())
     val diagnosis: StateFlow<com.zeronet.mobile.model.Diagnosis> = _diagnosis.asStateFlow()
 
@@ -127,6 +133,10 @@ class EngineClient private constructor(private val context: Context) {
     /** Run the connection self-test; results arrive in [diagnosis]. */
     fun diagnose() = send(Ipc.DIAGNOSE, null)
 
+    /** Get a Cloudflare WARP account; progress and the result arrive in [warp]. */
+    fun warpStart() = send(Ipc.WARP_START, null)
+    fun warpCancel() = send(Ipc.WARP_CANCEL, null)
+
     /** Tell the engine settings changed (applies LAN/routing changes to a live connection). */
     fun pushSettings() = send(Ipc.SETTINGS, SettingsStore.get(context).current.toJson().toString())
 
@@ -181,6 +191,8 @@ class EngineClient private constructor(private val context: Context) {
                     val o = JSONObject(it)
                     if (o.optBoolean("done")) null else o.optInt("d") to o.optInt("t")
                 }
+                Ipc.RACE -> json?.let { _race.value = Ipc.raceFromJson(JSONObject(it)) }
+                Ipc.WARP -> json?.let { _warp.value = Ipc.warpFromJson(it) }
                 Ipc.DIAGNOSIS -> json?.let { _diagnosis.value = Ipc.diagnosisFromJson(it) }
                 Ipc.IMPORT_RESULT -> json?.let { pendingImport?.complete(Ipc.importFromJson(it)); pendingImport = null }
             }

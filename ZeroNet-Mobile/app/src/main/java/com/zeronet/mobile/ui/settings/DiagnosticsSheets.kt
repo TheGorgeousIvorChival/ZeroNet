@@ -67,6 +67,8 @@ fun DiagnosticsSheet(visible: Boolean, diagnosis: Diagnosis, onRun: () -> Unit, 
     ZeroSheet(visible = visible, onDismiss = onDismiss, title = title) {
         SheetHeader(title, stringResource(R.string.diag_body))
         SheetBody {
+            com.zeronet.mobile.ui.effects.PathMap(diagnosis.checks, Modifier.padding(top = 4.dp, bottom = 12.dp))
+            Hairline()
             if (diagnosis.checks.isEmpty()) {
                 Text(stringResource(R.string.diag_not_run), style = MaterialTheme.typography.bodyMedium, color = ZeroTheme.colors.muted, modifier = Modifier.padding(vertical = 12.dp))
             }

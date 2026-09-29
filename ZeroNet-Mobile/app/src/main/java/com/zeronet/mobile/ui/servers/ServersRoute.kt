@@ -29,6 +29,8 @@ fun ServersRoute() {
     var detailKey by rememberSaveable { mutableStateOf<String?>(null) }
     var importOpen by rememberSaveable { mutableStateOf(false) }
     var importText by remember { mutableStateOf<String?>(null) }
+    var warpOpen by rememberSaveable { mutableStateOf(false) }
+    val warp by controller.engine.warp.collectAsStateWithLifecycle()
 
     // Text shared into the app (or a tapped vless:// link) opens the import sheet prefilled.
     val pending = controller.pendingImport
@@ -101,6 +103,15 @@ fun ServersRoute() {
             importOpen = false
         },
         readClipboard = controller::readClipboard,
+        onWarp = { importOpen = false; warpOpen = true },
         onDismiss = { importOpen = false },
+    )
+
+    WarpSheet(
+        visible = warpOpen,
+        state = warp,
+        onStart = { controller.engine.warpStart() },
+        onCancel = { controller.engine.warpCancel() },
+        onDismiss = { warpOpen = false; controller.engine.warpCancel() },
     )
 }

@@ -2525,3 +2525,559 @@ fn a_live_session_shows_its_protocol_clock_and_speed_graphs() {
         "{wide}"
     );
 }
+
+fn warp_dialog(phase: zeronet_tui::modal::WarpPhase) -> ModalState {
+    ModalState::Warp {
+        phase,
+        created_tick: 0,
+    }
+}
+
+#[test]
+fn the_warp_dialog_asks_before_it_makes_an_account() {
+    use zeronet_tui::modal::WarpPhase;
+    let mut h = Harness::new();
+    h.modal_state = warp_dialog(WarpPhase::Offer);
+    let frame = h.draw(120, 40);
+    dump("modal_warp_offer", &frame);
+    assert!(frame.contains("Get a free Cloudflare WARP account"));
+    assert!(frame.contains("public halves"));
+    assert!(frame.contains("cloudflare.com/application/terms"));
+    assert!(frame.contains("Get account"));
+    assert!(frame.contains("Cancel"));
+    // Both buttons can be clicked.
+    for id in [ComponentId::WarpPrimary, ComponentId::WarpSecondary] {
+        let found = (0..40)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .any(|(x, y)| h.interaction.hit_test(x, y) == Some(id));
+        assert!(found, "{id:?} is unreachable");
+    }
+}
+
+#[test]
+fn the_warp_dialog_shows_the_work_as_it_happens() {
+    use zeronet_tui::modal::WarpPhase;
+    let mut h = Harness::new();
+    h.modal_state = warp_dialog(WarpPhase::Working {
+        steps: vec![
+            "Asking Cloudflare for an account…".into(),
+            "Account created. Keys made on this device.".into(),
+            "Connected to WARP (masque-h2).".into(),
+            "Found a server that works (842 ms)".into(),
+            "Trying 100 servers through the account…".into(),
+        ],
+    });
+    let frame = h.draw(120, 40);
+    dump("modal_warp_working", &frame);
+    assert!(frame.contains("Setting up WARP"));
+    assert!(frame.contains("Account created"));
+    assert!(frame.contains("Found a server that works (842 ms)"));
+    assert!(frame.contains("Trying 100 servers"));
+    // Hiding is offered, and the work is not cancelled by it.
+    assert!(frame.contains("Hide"));
+}
+
+#[test]
+fn the_warp_dialog_reports_the_result_and_offers_to_connect() {
+    use zeronet_tui::modal::WarpPhase;
+    let mut h = Harness::new();
+    h.modal_state = warp_dialog(WarpPhase::Done {
+        profile: 3,
+        fingerprint: None,
+        finished_tick: 0,
+        headline: "WARP is ready".into(),
+        detail: "It connects by trying every way at once and keeping the first that works. 3 servers work through it and are kept as a failsafe.".into(),
+    });
+    let frame = h.draw(120, 40);
+    dump("modal_warp_done", &frame);
+    assert!(frame.contains("WARP is ready"));
+    assert!(frame.contains("3 servers work through it"));
+    assert!(frame.contains("Connect"));
+
+    h.modal_state = warp_dialog(WarpPhase::Failed(
+        "Could not reach the WARP service. Connect to a working server first, then try again."
+            .into(),
+    ));
+    let frame = h.draw(120, 40);
+    dump("modal_warp_failed", &frame);
+    assert!(frame.contains("That did not work"));
+    assert!(frame.contains("working server"));
+    assert!(frame.contains("Try again"));
+}
+
+#[test]
+fn the_warp_dialog_manages_an_existing_profile_with_clickable_options() {
+    use zeronet_tui::modal::WarpPhase;
+    let mut h = Harness::new();
+    h.modal_state = warp_dialog(WarpPhase::Manage {
+        profile: 3,
+        remark: "WARP".into(),
+        exits: 2,
+        reverse: false,
+        route: "auto".into(),
+        selected: 1,
+    });
+    let frame = h.draw(120, 40);
+    dump("modal_warp_manage", &frame);
+    assert!(frame.contains("2 servers listed"));
+    assert!(frame.contains("The tunnel alone goes first"));
+    assert!(frame.contains("Find servers that work through this account"));
+    assert!(frame.contains("Go through servers first instead"));
+    assert!(frame.contains("Get a new account"));
+    // The highlighted entry carries the marker.
+    let marked = frame
+        .lines()
+        .find(|line| line.contains("▸"))
+        .expect("a highlighted entry");
+    assert!(
+        marked.contains("Go through servers first instead"),
+        "{marked}"
+    );
+    for index in 0..zeronet_tui::modal::WARP_OPTIONS {
+        let id = ComponentId::WarpOption(index);
+        let found = (0..40)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .any(|(x, y)| h.interaction.hit_test(x, y) == Some(id));
+        assert!(found, "option {index} is unreachable");
+    }
+
+    // The other order reads the other way round.
+    h.modal_state = warp_dialog(WarpPhase::Manage {
+        profile: 3,
+        remark: "WARP".into(),
+        exits: 1,
+        reverse: true,
+        route: "masque-h2".into(),
+        selected: 0,
+    });
+    let frame = h.draw(120, 40);
+    assert!(frame.contains("1 server listed"));
+    assert!(frame.contains("Servers go first"));
+    assert!(frame.contains("Go through the tunnel alone first instead"));
+}
+
+#[test]
+fn the_warp_dialog_fits_a_small_terminal() {
+    use zeronet_tui::modal::WarpPhase;
+    let mut h = Harness::new();
+    h.modal_state = warp_dialog(WarpPhase::Offer);
+    let frame = h.draw(80, 24);
+    dump("modal_warp_offer_small", &frame);
+    assert!(frame.contains("Get account"));
+    assert!(frame.contains("Cancel"));
+    assert!(frame.contains("cloudflare.com/application/terms"));
+}
+
+/// The key row of a drawn WARP dialog: the line under its label, cut between
+/// the dialog's borders and trimmed to the strip.
+fn cipher_row(frame: &str, label: &str) -> String {
+    let lines: Vec<&str> = frame.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.contains(label))
+        .unwrap_or_else(|| panic!("no {label} in the dialog"));
+    // The dialog's edges, from its title line.
+    let title: Vec<char> = lines
+        .iter()
+        .find(|line| line.contains("CLOUDFLARE WARP"))
+        .expect("the dialog's title")
+        .chars()
+        .collect();
+    let name = title
+        .windows(15)
+        .position(|w| w.iter().collect::<String>() == "CLOUDFLARE WARP")
+        .unwrap();
+    let left = title[..name].iter().rposition(|c| *c == '╭').unwrap();
+    let right = name + title[name..].iter().position(|c| *c == '╮').unwrap();
+    let row: Vec<char> = lines[at + 1]
+        .chars()
+        .skip(left + 1)
+        .take(right - left - 1)
+        .collect();
+    // The buffer keeps a blank cell after each two-column character; it is
+    // the second half of that character, not a space.
+    let mut inner = String::new();
+    let mut skip = false;
+    for c in row {
+        if skip {
+            skip = false;
+            continue;
+        }
+        skip = ('\u{2e80}'..='\u{9fff}').contains(&c);
+        inner.push(c);
+    }
+    inner.trim().to_string()
+}
+
+/// Columns a string takes on a terminal (Chinese characters take two).
+fn columns(text: &str) -> usize {
+    text.chars()
+        .map(|c| {
+            if ('\u{2e80}'..='\u{9fff}').contains(&c) {
+                2
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+#[test]
+fn the_key_row_churns_while_the_account_is_made_and_keeps_its_shape() {
+    use zeronet_tui::modal::WarpPhase;
+    let mut h = Harness::new();
+    h.modal_state = warp_dialog(WarpPhase::Working {
+        steps: vec!["Asking Cloudflare for an account…".into()],
+    });
+    let mut rows = std::collections::BTreeSet::new();
+    let mut saw_wide = false;
+    for tick in 0..240 {
+        h.effects.advance_tick();
+        let frame = h.draw(120, 40);
+        if tick % 60 == 0 {
+            dump(&format!("modal_warp_working_{tick}"), &frame);
+        }
+        let row = cipher_row(&frame, "DERIVING KEY");
+        // Eight groups of four, the same width in every frame, whether or not
+        // a two-column character is in it.
+        assert_eq!(columns(&row), 39, "tick {tick}: {row:?}");
+        assert_eq!(
+            row.matches(' ').count(),
+            7 + row.matches('\u{3000}').count()
+        );
+        saw_wide |= row.chars().any(|c| ('\u{2e80}'..='\u{9fff}').contains(&c));
+        rows.insert(row);
+    }
+    assert!(
+        rows.len() > 60,
+        "the row barely moved: {} distinct",
+        rows.len()
+    );
+    assert!(saw_wide, "no Chinese character in 240 frames");
+}
+
+#[test]
+fn the_key_settles_into_its_fingerprint_from_left_to_right() {
+    use zeronet_tui::modal::WarpPhase;
+    let fingerprint = "3FA9 C0D1 7B42 E8A5 1D6C 90BE 44F7 A2C3";
+    let mut h = Harness::new();
+    h.modal_state = warp_dialog(WarpPhase::Done {
+        profile: 3,
+        headline: "WARP is ready".into(),
+        detail: "It connects by trying every way at once.".into(),
+        fingerprint: Some(fingerprint.into()),
+        finished_tick: 0,
+    });
+    // Nothing has settled yet.
+    let start = cipher_row(&h.draw(120, 40), "KEY FINGERPRINT");
+    assert_ne!(start, fingerprint);
+    // Part way, a prefix of the real key is in place and the rest still churns.
+    for _ in 0..16 {
+        h.effects.advance_tick();
+    }
+    let middle = cipher_row(&h.draw(120, 40), "KEY FINGERPRINT");
+    dump("modal_warp_reveal_middle", &h.draw(120, 40));
+    assert!(middle.starts_with("3FA9 C0D1"), "{middle}");
+    assert_ne!(middle, fingerprint);
+    assert_eq!(columns(&middle), 39);
+    // Then it is the key, exactly.
+    for _ in 0..60 {
+        h.effects.advance_tick();
+    }
+    let end = cipher_row(&h.draw(120, 40), "KEY FINGERPRINT");
+    dump("modal_warp_reveal_end", &h.draw(120, 40));
+    assert_eq!(end, fingerprint);
+}
+
+#[test]
+fn with_animation_off_the_key_is_simply_there() {
+    use zeronet_tui::modal::WarpPhase;
+    let fingerprint = "3FA9 C0D1 7B42 E8A5 1D6C 90BE 44F7 A2C3";
+    let mut h = Harness::new();
+    h.caps.animations = false;
+    h.modal_state = warp_dialog(WarpPhase::Done {
+        profile: 3,
+        headline: "WARP is ready".into(),
+        detail: "Ready.".into(),
+        fingerprint: Some(fingerprint.into()),
+        finished_tick: 0,
+    });
+    assert_eq!(cipher_row(&h.draw(120, 40), "KEY FINGERPRINT"), fingerprint);
+}
+
+/// Write each cell's symbol and true colour next to the text dump, for
+/// rendering a frame as an image.
+fn dump_cells(name: &str, buffer: &ratatui::buffer::Buffer) {
+    let Ok(dir) = std::env::var("ZERONET_DUMP_FRAMES") else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let mut out = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, y)];
+            if let ratatui::style::Color::Rgb(r, g, b) = cell.fg {
+                out.push_str(&format!("{x} {y} {} {r} {g} {b}\n", cell.symbol()));
+            }
+        }
+    }
+    let _ = std::fs::write(format!("{dir}/{name}.cells"), out);
+}
+
+/// Braille cells (U+2800..) in the rows of the connect hero: what the globe
+/// leaves behind.
+fn braille_cells(frame: &str) -> usize {
+    frame
+        .chars()
+        .filter(|c| ('\u{2801}'..='\u{28FF}').contains(c))
+        .count()
+}
+
+#[test]
+fn the_globe_is_drawn_in_every_connection_state() {
+    let mut h = Harness::new();
+    h.configs[3].is_active = true;
+    let mut seen = Vec::new();
+    for (name, status, node) in [
+        ("globe_idle", ConnectionStatus::Disconnected, "None"),
+        (
+            "globe_connecting",
+            ConnectionStatus::Connecting,
+            "Germany Edge 01",
+        ),
+        (
+            "globe_connected",
+            ConnectionStatus::Connected,
+            "Germany Edge 01",
+        ),
+        ("globe_error", ConnectionStatus::Error, "Germany Edge 01"),
+    ] {
+        h.stats.status = status;
+        h.stats.active_node_name = node.into();
+        // Let the turn toward the route finish, one tick at a time.
+        let mut frame = h.draw(120, 40);
+        for _ in 0..60 {
+            h.effects.advance_tick();
+            frame = h.draw(120, 40);
+        }
+        dump(name, &frame);
+        dump_cells(name, &draw_buffer(&mut h, 120, 40));
+        seen.push((name, braille_cells(&frame)));
+    }
+    for (name, cells) in &seen {
+        assert!(
+            *cells > 120,
+            "{name}: only {cells} dots drawn, the globe is missing"
+        );
+    }
+}
+
+#[test]
+fn the_globe_moves_while_ambient_motion_is_on_and_holds_still_when_it_is_off() {
+    let mut h = Harness::new();
+    let first = h.draw(120, 40);
+    let mut differs = false;
+    for _ in 0..90 {
+        h.effects.advance_tick();
+        if h.draw(120, 40) != first {
+            differs = true;
+            break;
+        }
+    }
+    assert!(differs, "the globe never moved");
+
+    let mut h = Harness::new();
+    h.effects.set_ambient(false);
+    for _ in 0..30 {
+        h.effects.advance_tick();
+    }
+    let settled = h.draw(120, 40);
+    for _ in 0..60 {
+        h.effects.advance_tick();
+        assert_eq!(h.draw(120, 40), settled, "it moved with ambient off");
+    }
+}
+
+#[test]
+fn a_tiny_terminal_still_draws_the_dashboard_with_the_globe() {
+    let mut h = Harness::new();
+    for (w, h_) in [(80, 24), (100, 30)] {
+        let frame = h.draw(w, h_);
+        assert!(frame.contains("ZERONET"), "{w}x{h_}");
+    }
+}
+
+fn warp_link() -> String {
+    zero_discovery::warp::Account {
+        device_id: "d".into(),
+        wireguard_private_key: [4; 32],
+        wireguard_peer_key: [2; 32],
+        reserved: [1, 2, 3],
+        wireguard_endpoint: "162.159.192.1:2408".parse().unwrap(),
+        addresses: vec!["172.16.0.2".parse().unwrap()],
+        masque: None,
+    }
+    .link("auto")
+}
+
+#[test]
+fn a_warp_connection_shows_how_it_connected_and_its_account_picture() {
+    use zero_config::WarpRoute;
+    use zero_runtime::warp::{Fail, Lane, LaneState};
+
+    let mut h = Harness::new();
+    h.configs[0].raw_content = warp_link();
+    h.configs[0].remark = "Cloudflare WARP".into();
+    h.stats.status = ConnectionStatus::Connected;
+    h.stats.active_node_name = "Cloudflare WARP".into();
+    zero_runtime::warp::stage_race(
+        vec![
+            Lane {
+                route: WarpRoute::WireGuard,
+                state: LaneState::Lost(Fail::NoAnswer),
+                started_ms: 0,
+                ended_ms: 900,
+            },
+            Lane {
+                route: WarpRoute::MasqueHttp3,
+                state: LaneState::Lost(Fail::Refused),
+                started_ms: 200,
+                ended_ms: 260,
+            },
+            Lane {
+                route: WarpRoute::MasqueHttp2,
+                state: LaneState::Won,
+                started_ms: 400,
+                ended_ms: 1300,
+            },
+        ],
+        true,
+        1500,
+    );
+
+    let first = h.draw(120, 40);
+    assert!(first.contains("How it connected"), "the card is missing");
+    assert!(
+        first.contains("Trying 3 ways"),
+        "a new race starts as it began"
+    );
+
+    // The replay runs on the animation clock.
+    let mut frame = first;
+    for _ in 0..90 {
+        h.effects.advance_tick();
+        frame = h.draw(120, 40);
+    }
+    dump("warp_race_end", &frame);
+    assert!(
+        frame.contains("Connected through Web (HTTP/2)"),
+        "verdict missing"
+    );
+    assert!(frame.contains("no answer") && frame.contains("blocked"));
+    assert!(frame.contains("connected 1.3s"));
+    dump_cells("warp_race_end", &draw_buffer(&mut h, 120, 40));
+
+    // The account's picture stands in front of its name in the list.
+    assert!(
+        frame.lines().any(|line| line.contains("Cloudflare WARP")
+            && line.chars().any(|c| ('\u{2801}'..='\u{28FF}').contains(&c))
+            && line.contains("VLESS")),
+        "no picture beside the account"
+    );
+
+    // The card goes away a while after the replay.
+    for _ in 0..(30 * 16) {
+        h.effects.advance_tick();
+    }
+    assert!(!h.draw(120, 40).contains("How it connected"));
+
+    // And it is not drawn for a connection that is not WARP.
+    let mut plain = Harness::new();
+    plain.stats.status = ConnectionStatus::Connected;
+    assert!(!plain.draw(120, 40).contains("How it connected"));
+}
+
+fn check(
+    id: zero_discovery::selftest::Id,
+    status: zero_discovery::selftest::Status,
+    detail: &str,
+) -> zero_discovery::selftest::Check {
+    zero_discovery::selftest::Check {
+        id,
+        status,
+        detail: detail.into(),
+    }
+}
+
+#[test]
+fn the_connection_test_says_where_the_path_breaks_in_plain_words() {
+    use zero_discovery::selftest::{Id, Status};
+
+    let mut h = Harness::new();
+    // Running: the first checks in, the rest waiting.
+    h.modal_state = ModalState::Connection {
+        checks: vec![
+            check(Id::Network, Status::Ok, ""),
+            check(Id::Internet, Status::Running, ""),
+            check(Id::Dns, Status::Pending, ""),
+            check(Id::Tls, Status::Pending, ""),
+            check(Id::Tunnel, Status::Pending, ""),
+        ],
+        created_tick: 0,
+    };
+    let running = h.draw(120, 40);
+    dump("test_running", &running);
+    assert!(running.contains("CONNECTION TEST"));
+    assert!(running.contains("Checking each step of the way"));
+    assert!(running.contains("Testing…"));
+
+    // Finished with the filter cutting the name and the tunnel going round it.
+    h.modal_state = ModalState::Connection {
+        checks: vec![
+            check(Id::Network, Status::Ok, ""),
+            check(Id::Internet, Status::Ok, "HTTP 204"),
+            check(
+                Id::Dns,
+                Status::Ok,
+                "4 filtered names resolve to real addresses",
+            ),
+            check(
+                Id::Tls,
+                Status::Bad,
+                "SNI filtering: www.youtube.com connection reset during the handshake",
+            ),
+            check(Id::Tunnel, Status::Ok, "HTTP 204 in 412 ms"),
+        ],
+        created_tick: 0,
+    };
+    let filtered = h.draw(120, 40);
+    dump("test_sni", &filtered);
+    dump_cells("test_sni", &draw_buffer(&mut h, 120, 40));
+    assert!(
+        filtered.contains("The filter reads site names"),
+        "headline missing"
+    );
+    assert!(filtered.contains("prefers servers that hide the name"));
+    assert!(filtered.contains('╳'), "the break is not drawn");
+    assert!(filtered.contains("Run again"));
+    assert!(filtered.contains("TLS server names"));
+
+    // Everything fine.
+    h.modal_state = ModalState::Connection {
+        checks: vec![
+            check(Id::Network, Status::Ok, ""),
+            check(Id::Internet, Status::Ok, ""),
+            check(Id::Dns, Status::Ok, ""),
+            check(Id::Tls, Status::Ok, ""),
+            check(Id::Tunnel, Status::Skipped, "not connected"),
+        ],
+        created_tick: 0,
+    };
+    let fine = h.draw(120, 40);
+    assert!(fine.contains("Nothing is blocking you right now."));
+    assert!(!fine.contains('╳'));
+
+    // A small terminal still gets a dialog that fits.
+    let small = h.draw(80, 24);
+    assert!(small.contains("CONNECTION TEST"));
+}

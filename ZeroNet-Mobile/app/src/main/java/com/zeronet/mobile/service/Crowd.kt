@@ -26,10 +26,12 @@ import java.net.URL
  * found, public servers only, to a relay named in the rankings. The relay
  * runs on a filtered workers.dev address, so while connected reports go
  * through the tunnel, naming the carrier on mobile data and "any" on Wi-Fi
- * (through the tunnel the relay cannot tell the ISP). Straight out on the
- * phone's own network (the app is excluded from its VPN) is the fallback;
- * there the relay does see the ISP, and the network name it answers with is
- * remembered for this Wi-Fi.
+ * (through the tunnel the relay cannot tell the ISP). A report sent through
+ * the tunnel is never retried straight out: that would put this device's
+ * real address, and the fingerprint of a circumvention client, in front of a
+ * filtered host. Only when no tunnel is up does the app report directly on
+ * the phone's own network; the relay then sees the ISP, and the network name
+ * it answers with is remembered for this Wi-Fi.
  */
 object Crowd {
     private const val TAG = "Crowd"
@@ -206,12 +208,14 @@ object Crowd {
         clean: List<CleanIp>,
         tunnel: Proxy?,
         methods: JSONArray? = null,
-    ) {
+        modes: JSONArray? = null,
+    ): Boolean {
         val methodCount = methods?.length() ?: 0
-        if (results.isEmpty() && clean.isEmpty() && methodCount == 0) return
+        val modeCount = modes?.length() ?: 0
+        if (results.isEmpty() && clean.isEmpty() && methodCount == 0 && modeCount == 0) return false
         val relays = read(file(context))?.optJSONArray("relays")?.let { a -> List(a.length()) { a.optString(it) } }
             ?.filter { it.startsWith("https://") }.orEmpty()
-        if (relays.isEmpty()) return
+        if (relays.isEmpty()) return false
         val carrier = carrier(context)
         val remembered = prefs(context).getString("net:$localNetwork", null)
         fun body(net: String?) = JSONObject()
@@ -221,16 +225,20 @@ object Crowd {
             .put("clean", JSONArray().also { a -> clean.take(MAX_CLEAN).forEach { a.put(JSONObject().put("ip", it.ip).put("ms", bucketMs(it.ms))) } })
             // Techniques the core measured here, ids from its fixed vocabulary.
             .apply { if (methodCount > 0) put("methods", methods) }
+            // How each mode did (see ModeStats): fixed ids, rounded delays.
+            .apply { if (modeCount > 0) put("modes", modes) }
             .apply { if (net != null) put("net", net) }
             .toString()
         // Through the tunnel the relay sees the VPN server, not this network,
         // so the report must name the network itself: the carrier, else
-        // "any" (counted towards every network together). Straight out, the
-        // relay can see the ISP.
-        val attempts = listOfNotNull(
-            tunnel?.let { it to body(carrier?.let { c -> "cell:$c" } ?: "any") },
-            Proxy.NO_PROXY to body(carrier?.let { "cell:$it" }),
-        )
+        // "any" (counted towards every network together). With a tunnel up a
+        // report goes through it or not at all — a direct retry would send
+        // this phone's real address, and the fingerprint of a circumvention
+        // client, to a filtered workers.dev host. Straight out (no tunnel),
+        // the relay can see the ISP.
+        val attempts = tunnel
+            ?.let { listOf(it to body(carrier?.let { c -> "cell:$c" } ?: "any")) }
+            ?: listOf(Proxy.NO_PROXY to body(carrier?.let { "cell:$it" }))
         for ((route, payload) in attempts) {
             for (relay in relays) {
                 val answer = runCatching { post("$relay/v1/report", payload, route) }
@@ -239,9 +247,10 @@ object Crowd {
                 runCatching { JSONObject(answer).optString("net") }.getOrNull()
                     ?.takeIf { it.startsWith("asn:") && carrier == null && route == Proxy.NO_PROXY && it != remembered }
                     ?.let { prefs(context).edit().putString("net:$localNetwork", it).apply() }
-                return
+                return true
             }
         }
+        return false
     }
 
     /**

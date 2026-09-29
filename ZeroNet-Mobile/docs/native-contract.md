@@ -76,7 +76,8 @@ the static `protect(I)Z`, and treats `false` or an exception as failure. If no
  "link":"vless://...","name":"remark or host","protocol":"vless|vmess|trojan|ss|hysteria2|tuic|anytls",
  "transport":"tcp|ws|grpc|xhttp|httpupgrade|quic|...","security":"none|tls|reality",
  "host":"example.com","port":443,"country":"",
- "class":"xhttp_extra|reality|cdn|other" }
+ "class":"xhttp_extra|reality|cdn|other",
+ "fp":"3FA9 C0D1 7B42 E8A5 …" }
 ```
 
 - `key`: first 16 hex digits of BLAKE3 over the link with the `#remark`
@@ -88,6 +89,9 @@ the static `protect(I)Z`, and treats `false` or an exception as failure. If no
   non-empty `extra` query parameter), `reality`, `cdn` (TLS over
   WebSocket/gRPC/HTTPUpgrade), `other`.
 - `transport` is `quic` and `security` is `tls` for hysteria2/tuic.
+- `fp` appears only on `warp://` links: the fingerprint of the account's
+  public keys (eight groups of four hex digits). A screen draws it as a small
+  picture (`zero_discovery::glyph`, `ui/effects/Glyph.kt`).
 - Parsing accepts plain lists, base64 subscription bodies, links embedded in
   prose/HTML and several links per line. Non-proxy URLs are ignored, not
   rejected. `reasons` keys are `<scheme>:<malformed|invalid|unsupported>`.
@@ -281,6 +285,29 @@ One engine per port shares one address source, so `count` is split across the
 ports and each port probes different addresses; neighbours of a responsive
 address are probed next. `rtt_ms` is the best try. Only `preset:"cloudflare"`
 exists; anything else is an `error` event followed by `done`.
+
+## WarpRequest (warpRegister)
+
+```json
+{"proxy":"127.0.0.1:10809","direct":true,"want":4,"sample":100,"budget_ms":60000}
+```
+
+Every field is optional. `proxy` is a running tunnel's HTTP listener, used to
+reach Cloudflare's API when it is filtered by name; `direct` also tries the
+service without it. Creating the account is the person's choice: the host asks
+first and states Cloudflare's terms.
+
+Events:
+
+```json
+{"t":"step","line":"…"}
+{"t":"done","ok":true,"link":"warp://…","exits":n,"route":"auto","fingerprint":"XXXX XXXX … (8 groups)"}
+{"t":"done","ok":false,"error":"…"}
+```
+
+The keys are made on the device and only their public halves are sent. `link`
+holds the private keys: import it, never log it. `fingerprint` is a hash of the
+public keys, safe to show; the key-decryption animation settles on it.
 
 ## Runtime notes (Rust side)
 

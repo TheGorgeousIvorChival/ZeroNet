@@ -10,15 +10,22 @@
 //! circle of radius `r` then comes out round on screen instead of squashed
 //! into a wide ellipse.
 //!
+//! **The globe.** Inside the ring turns a wireframe Earth (see
+//! [`crate::globe`]) that sways around the user's country. With a server
+//! chosen, a route runs from there to the server's country.
+//!
 //! **States.**
-//! * `Idle` — a single dim ring.
-//! * `Connecting` — a bright arc sweeping around the ring.
+//! * `Idle` — a dim ring; the route, if any, is previewed as dots.
+//! * `Connecting` — a bright arc sweeping around the ring, and a comet
+//!   running along the route (radar rings when there is no route to follow).
 //! * `Connected` — a green ring whose colour is interpolated every frame, so
-//!   it breathes slowly rather than blinking.
-//! * `Error` — a broken red ring.
+//!   it breathes slowly rather than blinking; the route is solid with a light
+//!   travelling along it.
+//! * `Error` — a broken red ring and a broken red route.
 
 use crate::daemon::ConnectionStatus;
-use crate::effects::VisualEffects;
+use crate::effects::{VisualEffects, ORB_CAMERA_TICKS, TICKS_PER_SECOND};
+use crate::globe::{self, Earth, GlobePalette, LatLon, Route};
 use crate::theme::{lerp_color, Theme};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -29,8 +36,13 @@ use ratatui::Frame;
 
 /// Fraction of the available half-extent the outer ring occupies.
 const OUTER_RING_SCALE: f64 = 0.92;
-/// Radii of the concentric rings, as fractions of the outer ring.
-const RING_SCALES: [f64; 3] = [1.0, 0.80, 0.62];
+/// Radii of the rings, as fractions of the outer ring. The globe fills the
+/// inside, so there is one.
+const RING_SCALES: [f64; 1] = [1.0];
+/// Radius of the globe, as a fraction of the outer ring.
+const GLOBE_SCALE: f64 = 0.86;
+/// Ticks the route takes to draw in once connected.
+const ROUTE_DRAW_TICKS: f64 = 33.0;
 /// Arc swept by the connecting indicator, in radians.
 const ARC_SWEEP: f64 = std::f64::consts::FRAC_PI_2;
 
@@ -47,6 +59,13 @@ pub struct OrbGeometry {
     pub radius_x: f32,
     /// Vertical radius in rows — about half `radius_x`, because rows are tall.
     pub radius_y: f32,
+}
+
+/// What the globe inside the orb shows: where the user is, and the route to
+/// the server when one is chosen.
+pub struct GlobeView<'a> {
+    pub home: LatLon,
+    pub route: Option<&'a Route>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +127,7 @@ pub fn render(
     hovered: bool,
     theme: &Theme,
     effects: &VisualEffects,
+    view: &GlobeView,
 ) -> OrbGeometry {
     let geo = geometry(area);
     if area.width < 4 || area.height < 3 {
@@ -125,6 +145,17 @@ pub fn render(
         palette = RingPalette::for_state(previous, hovered, theme, effects).mix(palette, progress);
     }
     let spin = effects.spin_angle(0.10);
+    let (focus, reveal) = camera_progress(
+        state,
+        effects.orb_track().and_then(|(_, previous, _)| previous),
+        effects.orb_track().map_or(0.0, |(_, _, age)| age),
+        effects.animations_enabled(),
+        view.route.is_some(),
+    );
+    let seconds = effects.current_time() / TICKS_PER_SECOND;
+    let ambient = effects.ambient_level();
+    let home = view.home;
+    let route = view.route;
 
     let canvas = Canvas::default()
         .block(Block::default())
@@ -134,17 +165,64 @@ pub fn render(
         .y_bounds([-h, h])
         .paint(move |ctx| {
             paint_rings(ctx, radius, state, spin, &palette);
+            let scene = globe::Scene {
+                earth: Earth::get(),
+                home,
+                route,
+                state,
+                palette: palette.globe,
+                seconds,
+                ambient,
+                focus,
+                reveal,
+            };
+            globe::paint(ctx, &scene, radius * GLOBE_SCALE);
         });
 
     frame.render_widget(canvas, area);
     geo
 }
 
-/// Colours for each concentric ring plus the sweeping arc.
+/// How far the camera has turned to the route and how much of the route is
+/// drawn, both `0..=1`, from the state, the one before it and how long ago it
+/// changed. Turning takes [`ORB_CAMERA_TICKS`]; the first state seen is
+/// already settled. With animations off everything is settled at once.
+fn camera_progress(
+    state: OrbState,
+    previous: Option<OrbState>,
+    age_ticks: f64,
+    animations: bool,
+    has_route: bool,
+) -> (f64, f64) {
+    let settled = !animations || previous.is_none();
+    let turn = if settled {
+        1.0
+    } else {
+        globe::smoothstep(age_ticks / ORB_CAMERA_TICKS)
+    };
+    let focus = if !has_route {
+        0.0
+    } else if state != OrbState::Idle {
+        turn
+    } else if previous.is_some_and(|p| p != OrbState::Idle) && !settled {
+        1.0 - turn
+    } else {
+        0.0
+    };
+    let reveal = if state == OrbState::Connected && !settled {
+        globe::smoothstep(age_ticks / ROUTE_DRAW_TICKS)
+    } else {
+        1.0
+    };
+    (focus, reveal)
+}
+
+/// Colours for the ring, the sweeping arc and the globe.
 #[derive(Debug, Clone, Copy)]
 struct RingPalette {
     rings: [Color; RING_SCALES.len()],
     arc: Color,
+    globe: GlobePalette,
 }
 
 impl RingPalette {
@@ -157,6 +235,7 @@ impl RingPalette {
         Self {
             rings,
             arc: lerp_color(self.arc, to.arc, t),
+            globe: self.globe.mix(to.globe, t),
         }
     }
 
@@ -166,21 +245,35 @@ impl RingPalette {
                 // A dim ring at rest; hovering lifts it to the accent without
                 // changing its shape.
                 let outer = if hovered { theme.accent } else { theme.border };
-                let mid = if hovered {
-                    theme.accent_dim
+                let land = if hovered {
+                    theme.accent
                 } else {
-                    theme.border
+                    theme.accent_dim
                 };
                 Self {
-                    rings: [outer, mid, theme.border],
+                    rings: [outer],
                     arc: outer,
+                    globe: GlobePalette {
+                        rim: land,
+                        coast: land,
+                        grid: theme.border,
+                        route: theme.accent_dim,
+                        spark: theme.accent_bright,
+                    },
                 }
             }
             OrbState::Connecting => {
                 let glow = effects.amber_glow();
                 Self {
-                    rings: [theme.accent_dim, theme.border, theme.border],
+                    rings: [theme.accent_dim],
                     arc: glow,
+                    globe: GlobePalette {
+                        rim: theme.accent_dim,
+                        coast: theme.accent,
+                        grid: theme.border,
+                        route: glow,
+                        spark: theme.accent_bright,
+                    },
                 }
             }
             OrbState::Connected => {
@@ -195,18 +288,31 @@ impl RingPalette {
                 ));
                 let soft = theme.adapt(lerp_color(raw.ok_deep(), raw.ok, phase));
                 Self {
-                    rings: [
-                        bright,
-                        soft,
-                        theme.adapt(lerp_color(raw.ok_deep(), raw.bg, 0.3)),
-                    ],
+                    rings: [bright],
                     arc: bright,
+                    globe: GlobePalette {
+                        rim: soft,
+                        coast: lerp_color(soft, bright, 0.5),
+                        grid: theme.adapt(lerp_color(raw.ok_deep(), raw.bg, 0.3)),
+                        route: bright,
+                        spark: theme.adapt(lerp_color(raw.ok_bright(), raw.text, 0.5)),
+                    },
                 }
             }
-            OrbState::Error => Self {
-                rings: [theme.err, theme.adapt(theme.raw.err_deep()), theme.border],
-                arc: theme.err,
-            },
+            OrbState::Error => {
+                let deep = theme.adapt(theme.raw.err_deep());
+                Self {
+                    rings: [theme.err],
+                    arc: theme.err,
+                    globe: GlobePalette {
+                        rim: deep,
+                        coast: deep,
+                        grid: theme.border,
+                        route: theme.err,
+                        spark: theme.err,
+                    },
+                }
+            }
         }
     }
 }
@@ -405,7 +511,93 @@ mod tests {
             fx.advance_tick();
         }
         assert!(fx.orb_transition().is_none(), "the cross-fade never ended");
+        // The colours are done, but the globe is still turning to its route.
+        assert!(fx.is_animating(), "the camera turn was cut short");
+        for _ in 0..(crate::effects::ORB_CAMERA_TICKS as usize) {
+            fx.advance_tick();
+        }
         assert!(!fx.is_animating(), "nothing should be left in flight");
+    }
+
+    #[test]
+    fn the_camera_turns_to_the_route_when_a_connection_starts_and_back_when_it_ends() {
+        let ticks = ORB_CAMERA_TICKS;
+        // Connecting: starts at home, ends facing the route.
+        let (start, _) =
+            camera_progress(OrbState::Connecting, Some(OrbState::Idle), 0.0, true, true);
+        let (end, _) = camera_progress(
+            OrbState::Connecting,
+            Some(OrbState::Idle),
+            ticks,
+            true,
+            true,
+        );
+        assert_eq!(start, 0.0);
+        assert_eq!(end, 1.0);
+        // Back to idle: starts facing the route, ends at home.
+        let (out, _) = camera_progress(OrbState::Idle, Some(OrbState::Connected), 0.0, true, true);
+        let (home, _) =
+            camera_progress(OrbState::Idle, Some(OrbState::Connected), ticks, true, true);
+        assert_eq!(out, 1.0);
+        assert_eq!(home, 0.0);
+        // No route, nothing to face.
+        let (none, _) = camera_progress(
+            OrbState::Connected,
+            Some(OrbState::Connecting),
+            ticks,
+            true,
+            false,
+        );
+        assert_eq!(none, 0.0);
+    }
+
+    #[test]
+    fn a_state_seen_first_or_without_animations_is_already_settled() {
+        assert_eq!(
+            camera_progress(OrbState::Connected, None, 0.0, true, true),
+            (1.0, 1.0)
+        );
+        assert_eq!(
+            camera_progress(
+                OrbState::Connected,
+                Some(OrbState::Connecting),
+                0.0,
+                false,
+                true
+            ),
+            (1.0, 1.0)
+        );
+        assert_eq!(
+            camera_progress(OrbState::Idle, Some(OrbState::Connected), 0.0, false, true),
+            (0.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn the_route_draws_in_only_after_connecting() {
+        let drawing = camera_progress(
+            OrbState::Connected,
+            Some(OrbState::Connecting),
+            5.0,
+            true,
+            true,
+        )
+        .1;
+        let drawn = camera_progress(
+            OrbState::Connected,
+            Some(OrbState::Connecting),
+            ROUTE_DRAW_TICKS,
+            true,
+            true,
+        )
+        .1;
+        assert!(drawing > 0.0 && drawing < 1.0);
+        assert_eq!(drawn, 1.0);
+        // While connecting or failed the whole route is shown.
+        assert_eq!(
+            camera_progress(OrbState::Error, Some(OrbState::Connecting), 0.0, true, true).1,
+            1.0
+        );
     }
 
     #[test]

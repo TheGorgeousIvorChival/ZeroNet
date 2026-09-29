@@ -36,6 +36,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.zIndex
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -103,6 +105,8 @@ data class HomeState(
     /** Wall clock used for the session timer; tests pin it. */
     val now: Long = 0L,
     val profile: ConnectionProfile = ConnectionProfile.Normal,
+    /** How the last WARP connection was made; shown while a WARP account is connected. */
+    val race: com.zeronet.mobile.model.RaceState = com.zeronet.mobile.model.RaceState(),
 )
 
 @Composable
@@ -122,8 +126,19 @@ fun HomeScreen(
         is ConnState.Failed -> OrbPhase.Failed
         else -> OrbPhase.Busy
     }
-    Box(modifier.fillMaxSize()) {
+    val marsTrip = rememberMarsTrip()
+    Box(modifier.fillMaxSize().then(marsTrip.touchListener)) {
         StateBackdrop(phase, gaming = state.profile == ConnectionProfile.Gaming)
+        // A screen left alone for a long while visits Mars (see MarsTrip); a touch anywhere brings it home.
+        Cosmos(warp = marsTrip.frame?.warp ?: 0f)
+        // The controller plays each time gaming mode is switched on.
+        var burst by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+        var lastProfile by remember { androidx.compose.runtime.mutableStateOf(state.profile) }
+        LaunchedEffect(state.profile) {
+            if (state.profile == ConnectionProfile.Gaming && lastProfile != ConnectionProfile.Gaming) burst += 1
+            lastProfile = state.profile
+        }
+        com.zeronet.mobile.ui.effects.GamepadBurst(burst, Modifier.zIndex(5f))
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val orbSize = minOf(maxWidth - 64.dp, maxHeight * 0.44f, 320.dp).coerceAtLeast(180.dp)
             Column(
@@ -152,8 +167,9 @@ fun HomeScreen(
                         },
                         onClick = onOrbClick,
                         modifier = Modifier.size(orbSize),
+                        trip = marsTrip.frame,
                     )
-                    StatusLine(state, onRetry, Modifier.padding(horizontal = 24.dp))
+                    StatusLine(state, onRetry, Modifier.padding(horizontal = 24.dp), marsWords = marsTrip.frame?.words == true)
                 }
                 Column(
                     Modifier
@@ -171,6 +187,10 @@ fun HomeScreen(
                     ) {
                         if (conn is ConnState.Connected) {
                             Column {
+                                if (conn.server.fingerprint.isNotEmpty() && state.race.lanes.size > 1) {
+                                    Spacer(Modifier.height(12.dp))
+                                    RaceLanes(state.race)
+                                }
                                 Spacer(Modifier.height(12.dp))
                                 StatsCard(state.stats, conn.since, state.now)
                                 CdnNotice(state.stats.cdn)
@@ -224,7 +244,7 @@ private fun orbStateText(state: HomeState): String {
 }
 
 @Composable
-private fun StatusLine(state: HomeState, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+private fun StatusLine(state: HomeState, onRetry: () -> Unit, modifier: Modifier = Modifier, marsWords: Boolean = false) {
     val c = ZeroTheme.colors
     val context = LocalContext.current
     val locale = currentLocale()
@@ -236,12 +256,19 @@ private fun StatusLine(state: HomeState, onRetry: () -> Unit, modifier: Modifier
             .semantics { liveRegion = LiveRegionMode.Polite },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        val text: String = when (conn) {
+        val text: String = if (marsWords) stringResource(R.string.mars_words) else when (conn) {
             // The orb and the line under it already say "not connected" / "connected to X".
             ConnState.Idle -> ""
             is ConnState.Searching -> {
                 val p = conn.progress
-                when (p.stage) {
+                // A later way of the recommended mode says which way it is trying.
+                val way = when (p.method) {
+                    "warp" -> R.string.way_warp
+                    "disguise" -> R.string.way_disguise
+                    "open" -> R.string.way_open
+                    else -> null
+                }
+                if (way != null) stringResource(way) else when (p.stage) {
                     DiscoveryStage.History -> stringResource(R.string.stage_history)
                     DiscoveryStage.Fetch -> stringResource(R.string.stage_fetch)
                     DiscoveryStage.Parse -> stringResource(R.string.stage_parse, Num.grouped(p.candidates.toLong(), locale))
@@ -289,6 +316,11 @@ private fun StatusLine(state: HomeState, onRetry: () -> Unit, modifier: Modifier
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+        // While a connection is being made, a kangaroo and her joey hop across; the faster the mode, the faster they go.
+        if (!marsWords && (conn is ConnState.Searching || conn is ConnState.Connecting || conn is ConnState.Reconnecting)) {
+            Spacer(Modifier.height(6.dp))
+            com.zeronet.mobile.ui.effects.KangarooRunner(state.profile)
         }
         if (conn is ConnState.Failed) {
             Spacer(Modifier.height(12.dp))
@@ -355,7 +387,7 @@ private fun ServerCard(state: HomeState, onClick: () -> Unit) {
             when {
                 connected != null || country.isNotEmpty() -> FlagBadge(country, size = 44.dp)
                 state.target is ConnectTarget.Subscription -> IconBadge(ZeroIcons.Link, size = 44.dp)
-                else -> IconBadge(ZeroIcons.Bolt, size = 44.dp)
+                else -> com.zeronet.mobile.ui.components.LightningBadge(size = 44.dp)
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {

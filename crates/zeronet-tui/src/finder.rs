@@ -65,6 +65,7 @@ impl Origin {
 
 /// What a search step reports.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum FinderEvent {
     /// `known`, then the discovery stages: `history`, `fetch`, `parse`, `tcp`, `real`.
     Stage(String),
@@ -339,6 +340,7 @@ impl From<LinkInfoWire> for LinkInfo {
             port: w.port,
             country: w.country,
             class: w.class,
+            fp: None,
         }
     }
 }

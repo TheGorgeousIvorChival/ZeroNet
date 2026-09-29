@@ -46,6 +46,10 @@ const AMBIENT_FADE_TICKS: f64 = 15.0;
 /// Ticks the orb takes to cross-fade from one connection state to the next.
 pub const ORB_TRANSITION_TICKS: f64 = 14.0;
 
+/// Ticks the globe takes to turn toward the route (or back home) after the
+/// connection state changes, and to draw the route in.
+pub const ORB_CAMERA_TICKS: f64 = 42.0;
+
 /// Cells per tick the wavefront travels outwards.
 ///
 /// Fast enough to cross a full-screen terminal in well under a second — the
@@ -240,6 +244,7 @@ impl VisualEffects {
             && (!self.rainbow_waves.is_empty()
                 || !self.ashes.is_empty()
                 || self.orb_transition().is_some()
+                || self.orb_camera_moving()
                 || self.ambient_fading())
     }
 
@@ -342,6 +347,26 @@ impl VisualEffects {
             return None;
         }
         Some((previous, ease_out_cubic(t)))
+    }
+
+    /// The state the orb is in, the one before it, and how many ticks ago it
+    /// changed. The globe reads its camera and route from this.
+    pub fn orb_track(&self) -> Option<(OrbState, Option<OrbState>, f64)> {
+        let track = self.orb?;
+        Some((
+            track.current,
+            track.previous,
+            (self.time - track.since).max(0.0),
+        ))
+    }
+
+    /// Whether the globe is still turning or drawing its route after a state
+    /// change, so the frame loop keeps drawing until it has settled.
+    pub fn orb_camera_moving(&self) -> bool {
+        self.animations
+            && self.orb.is_some_and(|track| {
+                track.previous.is_some() && self.time - track.since < ORB_CAMERA_TICKS
+            })
     }
 
     /// A one-shot bloom, `1.0` fading to `0.0`, played when the orb arrives

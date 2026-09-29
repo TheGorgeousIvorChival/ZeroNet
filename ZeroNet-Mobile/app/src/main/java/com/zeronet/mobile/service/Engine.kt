@@ -23,12 +23,16 @@ import com.zeronet.mobile.model.DiscoveryStage
 import com.zeronet.mobile.model.EvasionLevel
 import com.zeronet.mobile.model.FailReason
 import com.zeronet.mobile.model.ImportResult
+import com.zeronet.mobile.model.RaceState
 import com.zeronet.mobile.model.ScanResult
 import com.zeronet.mobile.model.ScanState
 import com.zeronet.mobile.model.Server
 import com.zeronet.mobile.model.Settings
+import com.zeronet.mobile.model.classic
 import com.zeronet.mobile.model.SpeedFloor
 import com.zeronet.mobile.model.TrafficStats
+import com.zeronet.mobile.model.WarpPhase
+import com.zeronet.mobile.model.WarpState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -122,28 +126,30 @@ object Engine {
     //   destinations (including domestic game servers) still go direct.
 
     private fun wantAlive(p: ConnectionProfile) = when (p) {
-        ConnectionProfile.Normal -> WANT_ALIVE
+        ConnectionProfile.Normal, ConnectionProfile.Legacy -> WANT_ALIVE
         ConnectionProfile.Fast -> 1
         ConnectionProfile.Gaming -> 3
     }
 
     private fun stopDiscoveryAt(p: ConnectionProfile) = when (p) {
-        ConnectionProfile.Normal -> STOP_DISCOVERY_AT
+        ConnectionProfile.Normal, ConnectionProfile.Legacy -> STOP_DISCOVERY_AT
         ConnectionProfile.Fast -> 1
         ConnectionProfile.Gaming -> 2
     }
 
     /** How many pool members go into the config: the rest are standby for the health check. */
     private fun linksInConfig(p: ConnectionProfile) = when (p) {
-        ConnectionProfile.Normal -> WANT_ALIVE
+        ConnectionProfile.Normal, ConnectionProfile.Legacy -> WANT_ALIVE
         ConnectionProfile.Fast, ConnectionProfile.Gaming -> 1
     }
 
     /** Whether a discovered or stored server suits the profile. A server the user picked always does. */
     private fun suits(server: Server, p: ConnectionProfile): Boolean {
         if (excludedByCountry(server)) return false
+        // The last rung of the ladder takes anything that works.
+        if (rung?.relaxed == true) return true
         return when (p) {
-            ConnectionProfile.Normal -> server.security == "tls" || server.security == "reality" ||
+            ConnectionProfile.Normal, ConnectionProfile.Legacy -> server.security == "tls" || server.security == "reality" ||
                 server.protocol == "hysteria2" || server.protocol == "tuic"
             ConnectionProfile.Fast -> true
             ConnectionProfile.Gaming -> server.kind != com.zeronet.mobile.model.ServerKind.Cdn &&
@@ -197,6 +203,10 @@ object Engine {
     private const val MIN_ACTIVE_BPS = 4_000L
     /** Fronted variants of past public finds tested per search (matches the desktop finder). */
     private const val FRONT_VARIANTS = 18
+    private const val WARP_STEPS_KEPT = 6
+    /** Gaming times this many servers, this many times each, before settling on one. */
+    private const val GAME_TUNE_SERVERS = 5
+    private const val GAME_TUNE_ROUNDS = 3
     /** Shortest gap between two screen-on/unlock tunnel checks. */
     private const val UNLOCK_CHECK_GAP_MS = 10_000L
     /** Upload rate that counts as real use on its own (matches the desktop
@@ -215,6 +225,9 @@ object Engine {
     private const val SLOW_COOLDOWN_MS = 10 * 60_000L
     /** Saved servers per family the self-test tries. */
     private const val FAMILY_SAMPLE = 4
+
+    /** The way of the ladder being tried, or being used once one worked; null outside the recommended mode. */
+    @Volatile private var rung: Ladder.Rung? = null
 
     private lateinit var app: Context
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -402,6 +415,7 @@ object Engine {
     }
 
     fun disconnect() {
+        noteSessionEnd()
         connectJob?.cancel()
         monitorJob?.cancel()
         scope.launch {
@@ -588,6 +602,9 @@ object Engine {
 
     private suspend fun runConnection() {
         pool.clear()
+        rung = null
+        replacements = 0
+        connectStartedAt = System.currentTimeMillis()
         crowdResults.clear()
         chosenFailures = 0
         slowUntil.clear()
@@ -633,14 +650,21 @@ object Engine {
                     if (!running) { fail(FailReason.NoWorkingServer, ""); return }
                 }
                 ConnectTarget.Fastest -> {
-                    val tried = tryKnownFirst(network)
-                    if (pool.size < stopDiscoveryAt(settings.profile)) discover(network, excludeKeys = tried)
+                    if (settings.profile == ConnectionProfile.Normal) {
+                        climbLadder(network)
+                    } else {
+                        val tried = tryKnownFirst(network)
+                        if (pool.size < stopDiscoveryAt(settings.profile)) discover(network, excludeKeys = tried)
+                    }
+                    // How long a connect took, or that it did not come up: the plainest measure of a mode.
+                    noteMode("connect", running, (System.currentTimeMillis() - connectStartedAt).toInt())
                     if (!running) { reportCrowd(network); fail(FailReason.NoWorkingServer, ""); return }
                 }
             }
             reportCrowd(network)
             lastBackgroundFindAt = System.currentTimeMillis()
             monitorJob = scope.launch { monitor(network) }
+            if (settings.profile == ConnectionProfile.Gaming) scope.launch { tuneForGaming() }
         } catch (e: BringUpFailed) {
             // bringUp() already published the failure.
         } catch (e: CancellationException) {
@@ -650,6 +674,73 @@ object Engine {
             teardown()
             fail(FailReason.CoreError, e.message.orEmpty())
         }
+    }
+
+    /**
+     * Gaming: a few seconds after the tunnel is up, and before a match is
+     * likely to have started, time the servers in the pool several times and
+     * move the steadiest to the front (see [GameTune]). One switch at most;
+     * a server that is only marginally better is not worth dropping a
+     * connection for.
+     */
+    private suspend fun tuneForGaming() {
+        val candidates = mutex.withLock { usablePool().map { it.server } }.take(GAME_TUNE_SERVERS)
+        if (candidates.size < 2) return
+        val timings = HashMap<String, MutableList<Int>>()
+        repeat(GAME_TUNE_ROUNDS) {
+            if (!running) return
+            testServers(candidates, timeoutMs = 2_500, concurrency = candidates.size) { key, delay, _ ->
+                timings.getOrPut(key) { mutableListOf() } += delay
+            }
+        }
+        mutex.withLock {
+            if (!running || settings.profile != ConnectionProfile.Gaming) return
+            val current = usablePool().firstOrNull()?.server?.key
+            val best = GameTune.pick(timings, current)
+            if (best == null || best == current) {
+                EngineLog.i("gaming: the server in use is already the steadiest")
+                return
+            }
+            val at = pool.indexOfFirst { it.server.key == best }
+            if (at < 0) return
+            EngineLog.i("gaming: moving to the steadiest server, ${describe(pool[at].server)}")
+            pool.add(0, pool.removeAt(at))
+            reloadPool()
+        }
+    }
+
+    /**
+     * The recommended mode's search: the ways of the [Ladder], fastest first,
+     * until the tunnel is up. The way that worked is remembered for this
+     * network and tried straight after the quick first one next time.
+     */
+    private suspend fun climbLadder(network: String) {
+        val prefs = app.getSharedPreferences("ladder", Context.MODE_PRIVATE)
+        val warpServers = withContext(Dispatchers.IO) { store.userServers().filter { it.fingerprint.isNotEmpty() && !it.excluded } }
+        val order = Ladder.order(Ladder.indexOf(prefs.getString("net:$network", null)), hasWarp = warpServers.isNotEmpty())
+        var tried = emptySet<String>()
+        for ((step, index) in order.withIndex()) {
+            val way = Ladder.rungs[index]
+            rung = way
+            EngineLog.i("way ${step + 1} of ${order.size}: ${way.id}")
+            publish(ConnState.Searching(DiscoveryProgress(method = way.id)))
+            when {
+                way.known -> tried = tryKnownFirst(network)
+                way.warp -> testAndCollect(warpServers, network)
+                else -> discover(network, excludeKeys = tried)
+            }
+            if (running) {
+                prefs.edit().putString("net:$network", way.id).apply()
+                EngineLog.i("connected by way ${way.id}")
+                // The pool can still grow in the background, by the way that worked.
+                if (pool.size < stopDiscoveryAt(settings.profile) && way.known) {
+                    rung = Ladder.rungs[Ladder.SEARCH]
+                    discover(network, excludeKeys = tried)
+                }
+                return
+            }
+        }
+        rung = null
     }
 
     /**
@@ -713,9 +804,35 @@ object Engine {
     private fun reportCrowd(network: String) {
         val results = crowdResults.values.sortedBy { !it.ok }
         crowdResults.clear()
-        if (!settings.shareResults || results.isEmpty()) return
+        if (!settings.shareResults) return
+        // How the modes did, kept from earlier sessions until there is a tunnel to send through.
+        val modes = ModeStats.pending(app)
+        if (results.isEmpty() && modes.length() == 0) return
         val tunnel = tunnelProxy()
-        scope.launch(Dispatchers.IO) { Crowd.report(app, network, results, emptyList(), tunnel) }
+        scope.launch(Dispatchers.IO) {
+            val sent = Crowd.report(app, network, results, emptyList(), tunnel, modes = modes.takeIf { it.length() > 0 })
+            if (sent && modes.length() > 0) ModeStats.sent(app, modes.length())
+        }
+    }
+
+    /** Remember how the mode in use did, for the anonymous report, when the user allows it. */
+    private fun noteMode(metric: String, ok: Boolean, ms: Int? = null) {
+        if (!settings.shareResults) return
+        ModeStats.record(app, ModeStats.Fact(ModeStats.id(settings.profile, metric), ok, ms))
+    }
+
+    /** The server changes made since this connection came up; a steady one made none. */
+    @Volatile private var replacements = 0
+
+    /** When the running connect began. */
+    @Volatile private var connectStartedAt = 0L
+
+    /** A session ended: how it went, if it lasted long enough to say. */
+    private fun noteSessionEnd() {
+        if (!running || since == 0L) return
+        val lasted = System.currentTimeMillis() - since
+        ModeStats.stableSession(lasted, replacements)?.let { noteMode("stable", it) }
+        usablePool().firstOrNull()?.delayMs?.takeIf { it >= 0 }?.let { noteMode("ping", true, it) }
     }
 
     /** The last method measurement reported, with its network, so each one is
@@ -750,14 +867,14 @@ object Engine {
      * link, found and reported like any public find, so fronting a personal
      * worker would put its name into the crowd report.
      */
-    private fun frontedVariants(history: List<String>, userServers: List<Server>): List<String> {
+    private fun frontedVariants(history: List<String>, userServers: List<Server>, max: Int = FRONT_VARIANTS): List<String> {
         val own = userServers.mapTo(HashSet()) { it.link }
         val public = history.filter { it !in own }
         if (public.isEmpty()) return emptyList()
         val request = JSONObject()
             .put("links", JSONArray(public))
             .put("seed", frontSeed())
-            .put("max", FRONT_VARIANTS)
+            .put("max", max)
         return runCatching {
             val answer = JSONObject(ZrayNative.frontLinks(request.toString()))
             val links = answer.optJSONArray("links") ?: JSONArray()
@@ -786,18 +903,18 @@ object Engine {
         val request = JSONObject()
             .put("sources", Sources.toJson(Sources.enabled(settings.disabledSources)))
             .put("cache_dir", File(app.cacheDir, "feeds").apply { mkdirs() }.absolutePath)
-            .put("priority_links", JSONArray(history + frontedVariants(history, userServers)))
+            .put("priority_links", JSONArray(history + frontedVariants(history, userServers, rung?.fronts ?: FRONT_VARIANTS)))
             .put("extra_links", JSONArray(userServers.filter { !it.excluded }.map { it.link }))
             // Servers the user excluded are skipped even when a feed lists them again.
             .put("exclude_keys", JSONArray((excludeKeys + withContext(Dispatchers.IO) { store.excludedKeys() }).toList()))
             .put("want_alive", wantAlive(settings.profile))
-            .put("max_seconds", 75)
+            .put("max_seconds", rung?.budgetSeconds ?: 75)
             .put("tcp_concurrency", 256).put("tcp_timeout_ms", 1500).put("tcp_stop_after_open", 1500)
             .put("real_concurrency", 64).put("real_timeout_ms", 3000)
             .put("probe_url", PROBE_URL)
             .put("next_tier_if_alive_below", 3)
             .put("fetch", true)
-        var progress = DiscoveryProgress()
+        var progress = DiscoveryProgress(method = rung?.id.orEmpty())
         var pendingReload = false
         var lastReload = 0L
         // Once the tunnel is up with a couple of backups, stop. Discovery runs
@@ -1017,9 +1134,9 @@ object Engine {
             .put("lan", JSONObject().put("enabled", s.lanShare).put("listen", "0.0.0.0").put("user", s.lanUser).put("pass", s.lanPass))
             // Games and voice run over UDP: Gaming never blocks it.
             .put("iran_direct", s.iranDirect).put("block_ads", s.blockAds)
-            .put("block_quic", s.blockQuic && s.profile != ConnectionProfile.Gaming)
+            .put("block_quic", s.blockQuic && s.profile != ConnectionProfile.Gaming && rung?.allowQuic != true)
             // Fragmenting the ClientHello costs round trips; Fast and Gaming skip it.
-            .put("evasion", if (s.profile != ConnectionProfile.Normal) "off" else when (s.evasion) { EvasionLevel.Off -> "off"; EvasionLevel.Auto -> "auto"; EvasionLevel.Strong -> "strong" })
+            .put("evasion", if (!s.profile.classic) "off" else when (rung?.evasion ?: s.evasion) { EvasionLevel.Off -> "off"; EvasionLevel.Auto -> "auto"; EvasionLevel.Strong -> "strong" })
             .put("fragment_first", crowdFragmentFirst)
             .put("fragment_packets", s.fragmentPackets.trim().ifEmpty { "1-1" })
             .put("dns", JSONObject().put("remote", s.remoteDns.name.lowercase()).put("custom", s.customDns.trim()).put("local", "google").put("anti_sanction", s.antiSanctionDns.name.lowercase()).put("custom_anti_sanction", s.customAntiSanction.trim()).put("fakedns", s.fakeDns))
@@ -1080,6 +1197,7 @@ object Engine {
                 if (downHistory.size == 60) downHistory.removeFirst()
                 if (upHistory.size == 60) upHistory.removeFirst()
                 downHistory.addLast(downRate); upHistory.addLast(upRate)
+                o.optJSONObject("race")?.let { race.value = Ipc.raceFromJson(it) }
                 val next = TrafficStats(upRate, downRate, up, down, downHistory.toList(), upHistory.toList(), o.optString("cdn"))
                 o.optJSONArray("methods")?.takeIf { it.length() > 0 }?.let { reportMethods(it, NetworkIdentity.current(app) ?: network) }
                 stats.value = next
@@ -1207,6 +1325,7 @@ object Engine {
         if (!running || pool.size < 2) return@withLock
         if (settings.profile == ConnectionProfile.Gaming && !force) return@withLock
         if (target is ConnectTarget.Specific) return@withLock
+        replacements++
         val now = System.currentTimeMillis()
         val primary = pool.first()
         slowUntil[primary.server.key] = now + SLOW_COOLDOWN_MS
@@ -1404,6 +1523,73 @@ object Engine {
                 EngineLog.w("replacement search: ${e.message.orEmpty()}")
             }
         }
+    }
+
+    // ------------------------------------------------------------------ warp
+
+    val warp = MutableStateFlow(WarpState())
+
+    /** The last WARP route race, read from the core with each stats tick. */
+    val race = MutableStateFlow(RaceState())
+    private var warpJob: Job? = null
+
+    /**
+     * Get a Cloudflare WARP account: the native job makes the keys on the
+     * phone, registers them, and looks for servers that work through the
+     * account. When the tunnel is up the request goes through it, since the
+     * service may be filtered by name. On success the account's link is
+     * imported like any other server.
+     */
+    fun warpStart() {
+        if (warpJob?.isActive == true) return
+        warp.value = WarpState(WarpPhase.Working)
+        warpJob = scope.launch(Dispatchers.IO) {
+            try {
+                val request = JSONObject().put("direct", true)
+                if (running) request.put("proxy", "127.0.0.1:${settings.httpPort}")
+                var steps = emptyList<String>()
+                var finished = false
+                nativeJob { ZrayNative.warpRegister(request.toString(), it) }.collect { e ->
+                    when (e.optString("t")) {
+                        "step" -> {
+                            EngineLog.i("warp: ${e.optString("line")}")
+                            steps = (steps + e.optString("line")).takeLast(WARP_STEPS_KEPT)
+                            warp.value = WarpState(WarpPhase.Working, steps)
+                        }
+                        "done" -> {
+                            finished = true
+                            if (e.optBoolean("ok")) {
+                                val link = e.optString("link")
+                                val result = import(link)
+                                warp.value = if (result.added + result.duplicates > 0) {
+                                    WarpState(
+                                        WarpPhase.Done, steps, e.optString("fingerprint"),
+                                        e.optInt("exits"), e.optString("route"),
+                                    )
+                                } else {
+                                    WarpState(WarpPhase.Failed, steps, error = result.error ?: "import")
+                                }
+                            } else {
+                                warp.value = WarpState(WarpPhase.Failed, steps, error = e.optString("error"))
+                            }
+                        }
+                    }
+                }
+                if (!finished) warp.value = WarpState(WarpPhase.Failed, steps, error = "cancelled")
+            } catch (e: CancellationException) {
+                warp.value = WarpState()
+                throw e
+            } catch (e: Throwable) {
+                EngineLog.w("warp: ${e.message.orEmpty()}")
+                warp.value = WarpState(WarpPhase.Failed, warp.value.steps, error = e.message.orEmpty())
+            }
+        }
+    }
+
+    fun warpCancel() {
+        warpJob?.cancel()
+        warpJob = null
+        warp.value = WarpState()
     }
 
     // -------------------------------------------------------------- self-test
