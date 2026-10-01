@@ -98,9 +98,11 @@ pub unsafe fn stream_xor(
     }
 }
 
+#[allow(dead_code)]
 /// Policy A: widest core that fits, all the way down. Loses below 128 bytes on
 /// Neoverse (measured 0.74-0.95x), kept here as the comparison arm.
 #[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
 #[target_feature(enable = "neon")]
 pub unsafe fn stream_xor_wide(
     key32: &[u8; 32],
