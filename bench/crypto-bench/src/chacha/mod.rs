@@ -308,6 +308,14 @@ pub unsafe fn stream_xor(
     }
 }
 
+/// The 8-block rung on x86_64 is `avx2::xor8`, which is 16 YMM registers -- the
+/// whole file -- and therefore spills. The four-block core is 8 registers and
+/// does not, and four is also what the crate's AVX2 backend runs per refill, so
+/// the two of them are the same width. Whether the eighth block of ILP is worth
+/// the spilling is a measurement, and the harness measures it: the `ladder`
+/// column below 512 bytes is the four-block core, the `wide` column is the same
+/// core on the previous policy's routing, and the difference between the
+/// `ladder` speedup at 65536 and at 512 is the answer.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn stream_xor_avx2(

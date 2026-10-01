@@ -8,10 +8,15 @@
 //! round needs cost six instructions per *pair* of blocks rather than six per
 //! block. rotl8 is one `vpshufb` and rotl16 is one `vpshufd`.
 //!
-//! The three constant and key rows are the same in every lane, so only the
-//! counter row is per-block: 8 blocks of state cost 7 YMM registers, not 16,
-//! because the shared rows are named once and listed once per pair. That
-//! headroom is the whole reason the widths here go past the crate's four.
+//! Every pair of blocks needs its own four rows, and that is worth being precise
+//! about, because sharing the constant and key rows across pairs looks free and
+//! is not: the quarter round updates all four rows it is given, so a shared row
+//! advances once per *pair* rather than once per round, and the counter rows
+//! that come later in the list finish with fewer rounds than the ones that come
+//! first. The bit-identity gate caught that at len=193, the first length that
+//! reaches the four-block core. Four YMM a pair means 8 blocks is 16 registers,
+//! which is the whole file, so LLVM spills; the rounds are 40 double rounds
+//! against about 80 extra memory operations, which is the trade.
 //!
 //! Nothing loops over rounds and nothing is behind a function call, for the
 //! reason the NEON 1-block core spells out: ZeroNet builds at `opt-level = "s"`
@@ -203,25 +208,22 @@ pub unsafe fn xor2(
     bytes: usize,
 ) {
     let st = super::initial_state(key32, nonce12, start as u32);
-    // One 128-bit row, into both lanes. `_mm256_set1_epi32` would broadcast a
-    // single 32-bit word into all eight, which is not a row at all.
+    // One 128-bit row, into both lanes. `_mm256_set1_epi32` would put a single
+    // 32-bit word in all eight, which is not a row at all.
     let cst = _mm256_broadcastsi128_si256(_mm_loadu_si128(CONSTS.as_ptr().cast::<__m128i>()));
-    let k0 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));
-    let k1 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(8).cast::<__m128i>()));
+    let k0v = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));
+    let k1v = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(8).cast::<__m128i>()));
     let m = _mm256_loadu_si256(ROT8.as_ptr().cast::<__m256i>());
-    let n0 = st[13] as i32;
-    let n1 = st[14] as i32;
-    let n2 = st[15] as i32;
-    let oy = ctr2!(st[12], n0, n1, n2);
+    let a3o = ctr2!(st[12], st[13] as i32, st[14] as i32, st[15] as i32);
 
-    let (mut x0, mut x1, mut x2) = (cst, k0, k1);
-    let mut y3 = oy;
-    rounds10!(m; x0 x1 x2 y3);
+    let (mut a0, mut a1, mut a2) = (cst, k0v, k1v);
+    let mut a3 = a3o;
+    rounds10!(m; a0 a1 a2 a3);
 
-    let f0 = _mm256_add_epi32(x0, cst);
-    let f1 = _mm256_add_epi32(x1, k0);
-    let f2 = _mm256_add_epi32(x2, k1);
-    let f3 = _mm256_add_epi32(y3, oy);
+    let f0 = _mm256_add_epi32(a0, cst);
+    let f1 = _mm256_add_epi32(a1, k0v);
+    let f2 = _mm256_add_epi32(a2, k1v);
+    let f3 = _mm256_add_epi32(a3, a3o);
     emit_pair!(f0, f1, f2, f3, 0, bytes, inp, out);
 }
 
@@ -236,29 +238,30 @@ pub unsafe fn xor4(
     bytes: usize,
 ) {
     let st = super::initial_state(key32, nonce12, start as u32);
-    // One 128-bit row, into both lanes. `_mm256_set1_epi32` would broadcast a
-    // single 32-bit word into all eight, which is not a row at all.
     let cst = _mm256_broadcastsi128_si256(_mm_loadu_si128(CONSTS.as_ptr().cast::<__m128i>()));
-    let k0 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));
-    let k1 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(8).cast::<__m128i>()));
+    let k0v = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));
+    let k1v = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(8).cast::<__m128i>()));
     let m = _mm256_loadu_si256(ROT8.as_ptr().cast::<__m256i>());
-    let n0 = st[13] as i32;
-    let n1 = st[14] as i32;
-    let n2 = st[15] as i32;
-    let oy = ctr2!(st[12], n0, n1, n2);
-    let oz = ctr2!(st[12].wrapping_add(2), n0, n1, n2);
+    let c = st[12];
+    let (n0, n1, n2) = (st[13] as i32, st[14] as i32, st[15] as i32);
+    let a3o = ctr2!(c, n0, n1, n2);
+    let b3o = ctr2!(c.wrapping_add(2), n0, n1, n2);
 
-    let (mut x0, mut x1, mut x2) = (cst, k0, k1);
-    let (mut y3, mut z3) = (oy, oz);
-    rounds10!(m; x0 x1 x2 y3, x0 x1 x2 z3);
+    let (mut a0, mut a1, mut a2) = (cst, k0v, k1v);
+    let (mut b0, mut b1, mut b2) = (cst, k0v, k1v);
+    let (mut a3, mut b3) = (a3o, b3o);
+    rounds10!(m; a0 a1 a2 a3, b0 b1 b2 b3);
 
-    let f0 = _mm256_add_epi32(x0, cst);
-    let f1 = _mm256_add_epi32(x1, k0);
-    let f2 = _mm256_add_epi32(x2, k1);
-    let fy = _mm256_add_epi32(y3, oy);
-    let fz = _mm256_add_epi32(z3, oz);
-    emit_pair!(f0, f1, f2, fy, 0, bytes, inp, out);
-    emit_pair!(f0, f1, f2, fz, 128, bytes.saturating_sub(128), inp, out);
+    let f0 = _mm256_add_epi32(a0, cst);
+    let f1 = _mm256_add_epi32(a1, k0v);
+    let f2 = _mm256_add_epi32(a2, k1v);
+    let f3 = _mm256_add_epi32(a3, a3o);
+    let g0 = _mm256_add_epi32(b0, cst);
+    let g1 = _mm256_add_epi32(b1, k0v);
+    let g2 = _mm256_add_epi32(b2, k1v);
+    let g3 = _mm256_add_epi32(b3, b3o);
+    emit_pair!(f0, f1, f2, f3, 0, bytes, inp, out);
+    emit_pair!(g0, g1, g2, g3, 128, bytes.saturating_sub(128), inp, out);
 }
 
 /// Eight blocks, 512 bytes. Always whole: the ladder sizes this rung in bytes
@@ -266,34 +269,42 @@ pub unsafe fn xor4(
 #[target_feature(enable = "avx2")]
 pub unsafe fn xor8(key32: &[u8; 32], nonce12: &[u8; 12], start: u64, inp: *const u8, out: *mut u8) {
     let st = super::initial_state(key32, nonce12, start as u32);
-    // One 128-bit row, into both lanes. `_mm256_set1_epi32` would broadcast a
-    // single 32-bit word into all eight, which is not a row at all.
     let cst = _mm256_broadcastsi128_si256(_mm_loadu_si128(CONSTS.as_ptr().cast::<__m128i>()));
-    let k0 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));
-    let k1 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(8).cast::<__m128i>()));
+    let k0v = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));
+    let k1v = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(8).cast::<__m128i>()));
     let m = _mm256_loadu_si256(ROT8.as_ptr().cast::<__m256i>());
-    let n0 = st[13] as i32;
-    let n1 = st[14] as i32;
-    let n2 = st[15] as i32;
     let c = st[12];
-    let oy = ctr2!(c, n0, n1, n2);
-    let oz = ctr2!(c.wrapping_add(2), n0, n1, n2);
-    let ow = ctr2!(c.wrapping_add(4), n0, n1, n2);
-    let ov = ctr2!(c.wrapping_add(6), n0, n1, n2);
+    let (n0, n1, n2) = (st[13] as i32, st[14] as i32, st[15] as i32);
+    let a3o = ctr2!(c, n0, n1, n2);
+    let b3o = ctr2!(c.wrapping_add(2), n0, n1, n2);
+    let c3o = ctr2!(c.wrapping_add(4), n0, n1, n2);
+    let d3o = ctr2!(c.wrapping_add(6), n0, n1, n2);
 
-    let (mut x0, mut x1, mut x2) = (cst, k0, k1);
-    let (mut y3, mut z3, mut w3, mut v3) = (oy, oz, ow, ov);
-    rounds10!(m; x0 x1 x2 y3, x0 x1 x2 z3, x0 x1 x2 w3, x0 x1 x2 v3);
+    let (mut a0, mut a1, mut a2) = (cst, k0v, k1v);
+    let (mut b0, mut b1, mut b2) = (cst, k0v, k1v);
+    let (mut c0, mut c1, mut c2) = (cst, k0v, k1v);
+    let (mut d0, mut d1, mut d2) = (cst, k0v, k1v);
+    let (mut a3, mut b3, mut c3, mut d3) = (a3o, b3o, c3o, d3o);
+    rounds10!(m; a0 a1 a2 a3, b0 b1 b2 b3, c0 c1 c2 c3, d0 d1 d2 d3);
 
-    let f0 = _mm256_add_epi32(x0, cst);
-    let f1 = _mm256_add_epi32(x1, k0);
-    let f2 = _mm256_add_epi32(x2, k1);
-    let fy = _mm256_add_epi32(y3, oy);
-    let fz = _mm256_add_epi32(z3, oz);
-    let fw = _mm256_add_epi32(w3, ow);
-    let fv = _mm256_add_epi32(v3, ov);
-    emit_pair!(f0, f1, f2, fy, 0, 128, inp, out);
-    emit_pair!(f0, f1, f2, fz, 128, 128, inp, out);
-    emit_pair!(f0, f1, f2, fw, 256, 128, inp, out);
-    emit_pair!(f0, f1, f2, fv, 384, 128, inp, out);
+    let f0 = _mm256_add_epi32(a0, cst);
+    let f1 = _mm256_add_epi32(a1, k0v);
+    let f2 = _mm256_add_epi32(a2, k1v);
+    let f3 = _mm256_add_epi32(a3, a3o);
+    let g0 = _mm256_add_epi32(b0, cst);
+    let g1 = _mm256_add_epi32(b1, k0v);
+    let g2 = _mm256_add_epi32(b2, k1v);
+    let g3 = _mm256_add_epi32(b3, b3o);
+    let h0 = _mm256_add_epi32(c0, cst);
+    let h1 = _mm256_add_epi32(c1, k0v);
+    let h2 = _mm256_add_epi32(c2, k1v);
+    let h3 = _mm256_add_epi32(c3, c3o);
+    let i0 = _mm256_add_epi32(d0, cst);
+    let i1 = _mm256_add_epi32(d1, k0v);
+    let i2 = _mm256_add_epi32(d2, k1v);
+    let i3 = _mm256_add_epi32(d3, d3o);
+    emit_pair!(f0, f1, f2, f3, 0, 128, inp, out);
+    emit_pair!(g0, g1, g2, g3, 128, 128, inp, out);
+    emit_pair!(h0, h1, h2, h3, 256, 128, inp, out);
+    emit_pair!(i0, i1, i2, i3, 384, 128, inp, out);
 }
