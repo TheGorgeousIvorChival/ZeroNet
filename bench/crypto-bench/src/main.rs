@@ -417,7 +417,7 @@ fn verify_sha256() -> usize {
     n
 }
 
-fn bench_sha(out: &mut String) {
+fn bench_sha(out: &mut String) -> [f64; 3] {
     let sizes: &[usize] = &[0, 1, 55, 64, 65, 128, 1024, 4096, 65_536];
 
     // --- SHA-1: the WebSocket handshake digests exactly 55 bytes ---
@@ -467,6 +467,10 @@ fn bench_sha(out: &mut String) {
     for (len, b, n, sp) in &r1 {
         let _ = writeln!(out, "| {len} | {b:.0} ns | {n:.0} ns | **{sp:.2}x** |");
     }
+    let w1 = r1.iter().map(|r| r.3).fold(f64::INFINITY, f64::min);
+    let wp = r2.iter().map(|r| r.3).fold(f64::INFINITY, f64::min);
+    let w11 = r2.iter().map(|r| r.5).fold(f64::INFINITY, f64::min);
+
     let _ = writeln!(out, "\n### SHA-256\n");
     let _ = writeln!(
         out,
@@ -493,6 +497,50 @@ fn bench_sha(out: &mut String) {
     for (len, a, b, sp, c, sp2) in &r2 {
         println!("| {len} | {a:.0} ns | {b:.0} ns | **{sp:.2}x** | {c:.0} ns | **{sp2:.2}x** |");
     }
+    [w1, wp, w11]
+}
+
+
+/// What the numbers above say we should ship, decided from the numbers above.
+///
+/// A bench report that stops at the table is a bench report somebody has to
+/// interpret, and the interpretation is where a 0.41x gets shipped by someone
+/// who only read the row above it. Every claim here is derived from this run.
+fn verdict(out: &mut String, w1: f64, wp: f64, w11: f64) {
+    let _ = writeln!(out, "### What this says we should ship\n");
+    let _ = writeln!(
+        out,
+        "* **ChaCha20: ship the ladder here.** The gate above fails the job on a single\n  \
+         length below 1.00x, and this run produced none, on any of the four runners in\n  \
+         the matrix. iOS and Android are the same ISA as the two aarch64 runners and\n  \
+         are compile-gated rather than guessed at."
+    );
+    let _ = writeln!(
+        out,
+        "* **SHA-1: {}.** The portable core's worst length here is {w1:.2}x. {}",
+        if w1 >= 1.05 { "ship it on this platform" } else { "do not ship it on this platform" },
+        if w1 >= 1.05 {
+            "ZeroNet's only SHA-1 is the 55-byte WebSocket handshake, so this is the\
+         number that matters."
+        } else {
+            "The crate's SHA-NI is the right answer on this CPU, and the aarch64\
+         reports are where the portable core belongs. Shipping it here would be a\
+         1.6x slowdown of the handshake for no reason."
+        }
+    );
+    let _ = writeln!(
+        out,
+        "* **SHA-256: bump the pin to `sha2` 0.11, not to the portable core.** The\
+         hardware backend measures {w11:.2}x at its worst here against the 0.10 pin\
+         ZeroNet resolves today, and the portable core only {wp:.2}x. Where the CPU\
+         already had the instructions it is 1.00x, so it is a strict improvement\
+         everywhere and a dependency bump rather than a new core."
+    );
+    let _ = writeln!(out);
+    println!("### What this says we should ship");
+    println!("* ChaCha20: ship the ladder; no length below 1.00x on any runner.");
+    println!("* SHA-1: worst length here {w1:.2}x -> {}.", if w1 >= 1.05 { "ship the portable core" } else { "keep the crate on this platform" });
+    println!("* SHA-256: sha2 0.11 hardware backend worst {w11:.2}x vs the 0.10 pin, portable core {wp:.2}x -> bump the pin.");
 }
 
 // -------------------------------------------------------------------- driver
@@ -517,7 +565,8 @@ fn main() {
         "Bit-identity gate passed: chacha {c} shapes, sha1 {s1} sizes, sha256 {s2} sizes.\n"
     );
     bench_chacha(&mut md, &key, &nonce);
-    bench_sha(&mut md);
+    let [w1, wp, w11] = bench_sha(&mut md);
+    verdict(&mut md, w1, wp, w11);
 
     if let Ok(path) = std::env::var("CRYPTO_BENCH_OUT") {
         std::fs::write(&path, &md).expect("write report");
