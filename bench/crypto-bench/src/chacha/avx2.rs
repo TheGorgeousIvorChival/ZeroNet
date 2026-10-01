@@ -203,9 +203,11 @@ pub unsafe fn xor2(
     bytes: usize,
 ) {
     let st = super::initial_state(key32, nonce12, start as u32);
-    let cst = _mm256_set1_epi32(CONSTS[0] as i32);
-    let k0 = _mm256_set1_epi32(st[4] as i32);
-    let k1 = _mm256_set1_epi32(st[8] as i32);
+    // One 128-bit row, into both lanes. `_mm256_set1_epi32` would broadcast a
+    // single 32-bit word into all eight, which is not a row at all.
+    let cst = _mm256_broadcastsi128_si256(_mm_loadu_si128(CONSTS.as_ptr().cast::<__m128i>()));
+    let k0 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));
+    let k1 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(8).cast::<__m128i>()));
     let m = _mm256_loadu_si256(ROT8.as_ptr().cast::<__m256i>());
     let n0 = st[13] as i32;
     let n1 = st[14] as i32;
@@ -234,9 +236,11 @@ pub unsafe fn xor4(
     bytes: usize,
 ) {
     let st = super::initial_state(key32, nonce12, start as u32);
-    let cst = _mm256_set1_epi32(CONSTS[0] as i32);
-    let k0 = _mm256_set1_epi32(st[4] as i32);
-    let k1 = _mm256_set1_epi32(st[8] as i32);
+    // One 128-bit row, into both lanes. `_mm256_set1_epi32` would broadcast a
+    // single 32-bit word into all eight, which is not a row at all.
+    let cst = _mm256_broadcastsi128_si256(_mm_loadu_si128(CONSTS.as_ptr().cast::<__m128i>()));
+    let k0 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));
+    let k1 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(8).cast::<__m128i>()));
     let m = _mm256_loadu_si256(ROT8.as_ptr().cast::<__m256i>());
     let n0 = st[13] as i32;
     let n1 = st[14] as i32;
@@ -262,9 +266,11 @@ pub unsafe fn xor4(
 #[target_feature(enable = "avx2")]
 pub unsafe fn xor8(key32: &[u8; 32], nonce12: &[u8; 12], start: u64, inp: *const u8, out: *mut u8) {
     let st = super::initial_state(key32, nonce12, start as u32);
-    let cst = _mm256_set1_epi32(CONSTS[0] as i32);
-    let k0 = _mm256_set1_epi32(st[4] as i32);
-    let k1 = _mm256_set1_epi32(st[8] as i32);
+    // One 128-bit row, into both lanes. `_mm256_set1_epi32` would broadcast a
+    // single 32-bit word into all eight, which is not a row at all.
+    let cst = _mm256_broadcastsi128_si256(_mm_loadu_si128(CONSTS.as_ptr().cast::<__m128i>()));
+    let k0 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));
+    let k1 = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(8).cast::<__m128i>()));
     let m = _mm256_loadu_si256(ROT8.as_ptr().cast::<__m256i>());
     let n0 = st[13] as i32;
     let n1 = st[14] as i32;

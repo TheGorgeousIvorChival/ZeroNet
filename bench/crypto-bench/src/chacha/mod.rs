@@ -232,6 +232,14 @@ pub unsafe fn stream_xor(
         crate_xor(key32, nonce12, start_block, inp, out, len);
         return;
     }
+    // A partial or single block: straight to the narrowest rung with nothing in
+    // between. Below 65 bytes the whole cost of the call is one block of rounds,
+    // so every branch the ladder would have taken is margin, and the measured
+    // margin on this branch was about 2%.
+    if len <= 64 {
+        unsafe { one_block(key32, nonce12, start_block, inp, out, len) };
+        return;
+    }
     // 512-byte groups, hoisted out because it is the only rung that can repeat
     // many times. Sized in bytes, not blocks: 500 bytes is 8 blocks but it is
     // not a 512-byte group, and the rung writes its whole group.
@@ -283,6 +291,11 @@ pub unsafe fn stream_xor(
 ) {
     if counter_overflows(start_block, len) {
         crate_xor(key32, nonce12, start_block, inp, out, len);
+        return;
+    }
+    // See the aarch64 dispatcher: below 65 bytes the block is the whole cost.
+    if len <= 64 {
+        unsafe { one_block(key32, nonce12, start_block, inp, out, len) };
         return;
     }
     if std::arch::is_x86_feature_detected!("avx2") {
