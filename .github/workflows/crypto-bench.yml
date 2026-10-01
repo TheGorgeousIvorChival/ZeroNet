@@ -27,15 +27,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The arch where the win is claimed: the pinned chacha20 gates its NEON
-          # backend behind `chacha20_force_neon`, which ZeroNet never sets.
-          - name: aarch64-linux (Graviton)
+          # aarch64, the server. The pinned chacha20 gates its NEON backend
+          # behind `chacha20_force_neon`, which ZeroNet never sets, so on this
+          # target the crate runs its own portable backend and the comparison is
+          # against 6.9 cycles/byte rather than against SIMD.
+          - name: aarch64-linux (Graviton2)
             runner: ubuntu-24.04-arm
+            report: ubuntu-24.04-arm
             rust: stable
-          # The arch where the claim is "no regression": the same crate already
-          # runtime-detects AVX2/SSE2 here.
+          # aarch64, the other side. Apple silicon is the same ISA as the iOS
+          # target but a completely different core: wider, deeper, and far less
+          # forgiving of a spill. A width that wins on Neoverse and loses on
+          # Firestorm is a width picked on one machine.
+          - name: aarch64-macos (Apple silicon)
+            runner: macos-15
+            report: macos-15
+            rust: stable
+          # x86_64-linux: the default server target, and the one where the crate
+          # already ships a tuned AVX2 backend, so this is the "do not lose to
+          # something good" case rather than the "beat something slow" case.
           - name: x86_64-linux
             runner: ubuntu-latest
+            report: ubuntu-latest
+            rust: stable
+          # x86_64-windows: the third OS on the same two ISAs. Anything whose
+          # cost depends on how the compiler happened to lay a struct out is
+          # exactly the kind of thing that moves here.
+          - name: x86_64-windows
+            runner: windows-latest
+            report: windows-latest
             rust: stable
     runs-on: ${{ matrix.runner }}
     steps:
@@ -48,47 +68,97 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: cpu
+        shell: bash
         run: |
-          echo "### $(uname -m) $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
-          lscpu 2>/dev/null | grep -iE "model name|^flags" | cut -c1-400 >> "$GITHUB_STEP_SUMMARY" || true
+          {
+            echo "### ${{ matrix.name }}"
+            case "$RUNNER_OS" in
+              Linux) lscpu 2>/dev/null | grep -iE "model name|^flags" | cut -c1-700 ;;
+              macOS) sysctl -n machdep.cpu.brand_string 2>/dev/null
+                     sysctl -n machdep.cpu.features 2>/dev/null | tr '\n' ' ' | cut -c1-700
+                     echo ;;
+              *)     echo "(no lscpu or sysctl on $RUNNER_OS)" ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # The bit-identity gate runs first and the job fails on any mismatch, so a
-      # fast-but-wrong core can never be reported as a win.
+      # Both gates live inside this binary. The bit-identity gate runs first, so
+      # a fast-but-wrong core can never be reported as a win. The no-regression
+      # gate runs last and fails the job if the policy that would ship is slower
+      # than the crate at a *single* length on this runner. Four runners, four
+      # independent chances to fail it.
       - name: bench
-        run: |
-          cd bench/crypto-bench
-          cargo run --release
+        working-directory: bench/crypto-bench
+        run: cargo run --release
 
       - name: publish report
         if: always()
+        shell: bash
         run: |
-          cd bench/crypto-bench
-          { echo; echo '```'; cat report.md 2>/dev/null || echo "no report produced"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo
+            echo '```'
+            cat bench/crypto-bench/report.md 2>/dev/null || echo "no report produced"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: crypto-bench-${{ matrix.name }}
+          name: crypto-bench-${{ matrix.report }}
           path: bench/crypto-bench/report.md
           if-no-files-found: warn
 
       # Committing the report back is what makes these numbers reviewable: the
       # artifact CDN was not reachable from every network this gets read on.
-      # Both arms push to the same branch, so this races itself. It is a
+      # All four arms push to the same branch, so this races itself. It is a
       # convenience step, not the measurement: never fail the job over it.
       - name: commit report
         if: always()
         continue-on-error: true
+        shell: bash
         run: |
           cd bench/crypto-bench
           mkdir -p reports
-          cp report.md "reports/${{ matrix.runner }}.md"
+          cp report.md "reports/${{ matrix.report }}.md"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "reports/${{ matrix.runner }}.md"
+          git add "reports/${{ matrix.report }}.md"
           if git diff --cached --quiet; then
             echo "no change"
           else
             git commit -m "bench report from ${{ matrix.name }}"
             git push
           fi
+
+  # iOS and Android run the same ISA as the two aarch64 runners above, so their
+  # throughput would be a guess dressed up as a number. Whether the cores
+  # *compile* for them is not a guess, and finding that out during a release
+  # instead of on this branch is the expensive way to find out.
+  cross-targets:
+    name: compiles for ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: aarch64-apple-ios
+            target: aarch64-apple-ios
+          - name: aarch64-linux-android
+            target: aarch64-linux-android
+          - name: x86_64-pc-windows-msvc
+            target: x86_64-pc-windows-msvc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # `check`, not `build`: a bin for a foreign target needs that target's
+      # linker, which an ubuntu runner does not have. Type-checking is what
+      # catches a wrong intrinsic or a wrong cfg anyway.
+      - name: check
+        run: cargo check --release --target ${{ matrix.target }} --manifest-path bench/crypto-bench/Cargo.toml

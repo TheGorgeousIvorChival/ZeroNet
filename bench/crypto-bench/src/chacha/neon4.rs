@@ -989,7 +989,9 @@ unsafe fn rounds4(o: [uint32x4_t; 16]) -> [uint32x4_t; 16] {
     ]
 }
 
-/// One 256-byte group: four whole blocks.
+/// One 256-byte group: four whole blocks. `bytes` is 1..=256; the ladder only
+/// ever passes a short `bytes` for the last group of a message, and the
+/// branches below are perfectly predicted in every other case.
 #[target_feature(enable = "neon")]
 pub unsafe fn xor_group(
     key32: &[u8; 32],
@@ -997,6 +999,7 @@ pub unsafe fn xor_group(
     start: u64,
     inp: *const u8,
     out: *mut u8,
+    bytes: usize,
 ) {
     let cs = vld1q_u32(CONSTS.as_ptr());
     let base = nonce_half(nonce12);
@@ -1015,10 +1018,26 @@ pub unsafe fn xor_group(
     let mut i = 0;
     while i < 16 {
         let d = i * 16;
-        vst1q_u8(
-            out.add(d),
-            veorq_u8(vld1q_u8(inp.add(d)), vreinterpretq_u8_u32(f[i])),
-        );
+        if d >= bytes {
+            break;
+        }
+        if d + 16 <= bytes {
+            vst1q_u8(
+                out.add(d),
+                veorq_u8(vld1q_u8(inp.add(d)), vreinterpretq_u8_u32(f[i])),
+            );
+        } else {
+            // 1..=15 bytes left in this group: spill the chunk and finish
+            // scalar, so nothing outside `bytes` is ever read or written.
+            let n = bytes - d;
+            let mut ks = [0u8; 16];
+            vst1q_u8(ks.as_mut_ptr(), vreinterpretq_u8_u32(f[i]));
+            let mut j = 0;
+            while j < n {
+                *out.add(d + j) = *inp.add(d + j) ^ ks[j];
+                j += 1;
+            }
+        }
         i += 1;
     }
 }
