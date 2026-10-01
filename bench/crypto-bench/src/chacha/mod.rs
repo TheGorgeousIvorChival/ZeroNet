@@ -14,6 +14,7 @@ use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use chacha20::{ChaCha20, Key as ChaKey, Nonce as ChaNonce12};
 
 /// The crate, used as the bit-identity oracle and for the counter-overflow tail.
+#[inline]
 pub fn crate_xor(
     key32: &[u8; 32],
     nonce12: &[u8; 12],
@@ -180,6 +181,58 @@ pub unsafe fn stream_xor_short2(
     }
 }
 
+/// Policy D: best of what was measured, rather than one rule for everything.
+/// The Graviton data says the 1-block core loses as a standalone message
+/// (0.74-0.85x) but the 2-block core wins there (1.33-1.43x), while above 128
+/// bytes the 2-block core is slightly *worse* than the 1-block core on a
+/// trailing 64-byte remainder. So: crate under 64, 2-block for a lone 64-127
+/// byte message, and cores above 128 with a remainder routed by size.
+#[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
+#[target_feature(enable = "neon")]
+pub unsafe fn stream_xor_best(
+    key32: &[u8; 32],
+    nonce12: &[u8; 12],
+    start_block: u64,
+    inp: *const u8,
+    out: *mut u8,
+    len: usize,
+) {
+    if len < 64 {
+        crate_xor(key32, nonce12, start_block, inp, out, len);
+        return;
+    }
+    let groups = len / 512;
+    unsafe { neon8::stream_xor_bulk(key32, nonce12, start_block, inp, out, groups) };
+    let mut done = groups * 512;
+    while len - done >= 256 {
+        unsafe {
+            neon4::xor_group(key32, nonce12, start_block + (done as u64) / 64,
+                             inp.add(done), out.add(done))
+        };
+        done += 256;
+    }
+    if len - done >= 128 {
+        unsafe {
+            neon2::xor_group(key32, nonce12, start_block + (done as u64) / 64,
+                             inp.add(done), out.add(done))
+        };
+        done += 128;
+    }
+    let rest = len - done;
+    if rest >= 64 {
+        let mut tmp = [0u8; 128];
+        unsafe {
+            neon2::xor_group(key32, nonce12, start_block + (done as u64) / 64,
+                             inp.add(done), tmp.as_mut_ptr())
+        };
+        core::ptr::copy_nonoverlapping(tmp.as_ptr(), out.add(done), rest);
+    } else if rest > 0 {
+        crate_xor(key32, nonce12, start_block + (done as u64) / 64,
+                  inp.add(done), out.add(done), rest);
+    }
+}
+
 /// Non-aarch64: the crate already runtime-detects AVX2/SSE2 here, so there is
 /// nothing to add and nothing to regress.
 #[cfg(not(target_arch = "aarch64"))]
@@ -202,6 +255,11 @@ pub unsafe fn stream_xor_wide(k: &[u8; 32], n: &[u8; 12], s: u64, i: *const u8, 
 #[cfg(not(target_arch = "aarch64"))]
 #[allow(dead_code)]
 pub unsafe fn stream_xor_guarded(k: &[u8; 32], n: &[u8; 12], s: u64, i: *const u8, o: *mut u8, l: usize) {
+    crate_xor(k, n, s, i, o, l);
+}
+#[cfg(not(target_arch = "aarch64"))]
+#[allow(dead_code)]
+pub unsafe fn stream_xor_best(k: &[u8; 32], n: &[u8; 12], s: u64, i: *const u8, o: *mut u8, l: usize) {
     crate_xor(k, n, s, i, o, l);
 }
 #[cfg(not(target_arch = "aarch64"))]

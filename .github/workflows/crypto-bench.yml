@@ -74,8 +74,11 @@ jobs:
 
       # Committing the report back is what makes these numbers reviewable: the
       # artifact CDN was not reachable from every network this gets read on.
+      # Both arms push to the same branch, so this races itself. It is a
+      # convenience step, not the measurement: never fail the job over it.
       - name: commit report
         if: always()
+        continue-on-error: true
         run: |
           cd bench/crypto-bench
           mkdir -p reports
