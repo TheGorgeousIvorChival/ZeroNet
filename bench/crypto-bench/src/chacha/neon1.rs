@@ -12,12 +12,17 @@
 //!   * ZeroNet builds at `opt-level = "s"` and this harness mirrors that
 //!     profile on purpose, because a number measured at -O3 is not a number
 //!     anybody ships. At -Os LLVM does not unroll, so every double round pays
-//!     a compare and a branch over a 60-operation body, and the rotate
-//!     helpers are outlined rather than inlined.
+//!     a compare and a branch over a 60-operation body.
 //!   * One block in flight has no instruction-level parallelism to hide any of
 //!     that behind, which is exactly why the same rolled loop in the 8-block
 //!     core is invisible. One state is the only width where loop overhead is
 //!     not amortised.
+//!
+//! The rotations are spelled out inside the quarter-round macro rather than
+//! being helper functions, because `#[inline(always)]` cannot be combined with
+//! `#[target_feature]`, and a helper that is merely `#[inline]` is exactly the
+//! outlining that made this file slow in the first place. A macro expands where
+//! it is written, so there is nothing left for the inliner to get wrong at -Os.
 //!
 //! What does not change: the row layout, the `vextq_u32` row rotation that
 //! makes one lane-wise quarter round compute all four diagonals, the XOR fused
@@ -27,55 +32,39 @@ use core::arch::aarch64::*;
 
 /// Byte indices that rotate every 32-bit lane left by 8 inside `vqtbl1q_u8`.
 ///
-/// A function-local `const` array would have its address taken, and the store
-/// to `out` in the block epilogue is then something LLVM must assume may alias
-/// it, so the mask gets reloaded after every block. It is loaded once in
+/// A function-local `const` array would have its address taken, and the store to
+/// `out` in the block epilogue is then something LLVM must assume may alias it,
+/// so the mask would be reloaded after every block. It is loaded once in
 /// `stream_xor` and carried through the rounds as a value instead.
 const ROT8: [u8; 16] = [3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14];
 
-#[inline(always)]
-#[target_feature(enable = "neon")]
-unsafe fn rotl16(v: uint32x4_t) -> uint32x4_t {
-    vreinterpretq_u32_u16(vrev32q_u16(vreinterpretq_u16_u32(v)))
-}
-
-#[inline(always)]
-#[target_feature(enable = "neon")]
-unsafe fn rotl8(v: uint32x4_t, m: uint8x16_t) -> uint32x4_t {
-    vreinterpretq_u32_u8(vqtbl1q_u8(vreinterpretq_u8_u32(v), m))
-}
-
-#[inline(always)]
-#[target_feature(enable = "neon")]
-unsafe fn rotl12(v: uint32x4_t) -> uint32x4_t {
-    vorrq_u32(vshlq_n_u32(v, 12), vshrq_n_u32(v, 20))
-}
-
-#[inline(always)]
-#[target_feature(enable = "neon")]
-unsafe fn rotl7(v: uint32x4_t) -> uint32x4_t {
-    vorrq_u32(vshlq_n_u32(v, 7), vshrq_n_u32(v, 25))
-}
-
 /// One lane-wise quarter round. Lane i is whichever of the four quarter rounds
 /// the current frame has lined up; both frames of a double round use the same
-/// eight operations.
+/// eight operations, so this is also where the row layout pays off -- four
+/// scalar quarter rounds for the price of one vector one.
+///
+/// The rotations are inline rather than helper calls: see the file header. rotl16
+/// is one `rev32`, rotl8 is one `tbl`, and rotl12 and rotl7 are the two shifts
+/// and an `orr` that a 32-bit rotate by a non-half amount costs on this ISA.
 macro_rules! qr {
     ($a:ident, $b:ident, $c:ident, $d:ident, $m:ident) => {{
         $a = vaddq_u32($a, $b);
-        $d = rotl16(veorq_u32($d, $a));
+        $d = vreinterpretq_u32_u16(vrev32q_u16(vreinterpretq_u16_u32(veorq_u32($d, $a))));
         $c = vaddq_u32($c, $d);
-        $b = rotl12(veorq_u32($b, $c));
+        let t = veorq_u32($b, $c);
+        $b = vorrq_u32(vshlq_n_u32(t, 12), vshrq_n_u32(t, 20));
         $a = vaddq_u32($a, $b);
-        $d = rotl8(veorq_u32($d, $a), $m);
+        $d = vreinterpretq_u32_u8(vqtbl1q_u8(vreinterpretq_u8_u32(veorq_u32($d, $a)), $m));
         $c = vaddq_u32($c, $d);
-        $b = rotl7(veorq_u32($b, $c));
+        let t = veorq_u32($b, $c);
+        $b = vorrq_u32(vshlq_n_u32(t, 7), vshrq_n_u32(t, 25));
     }};
 }
 
 /// One double round: the column round, a row rotation that lines the four
 /// diagonals up, the diagonal round, and the row rotation back for the next
-/// column round.
+/// column round. `vextq_u32` with the same register twice is a lane rotation,
+/// one instruction.
 macro_rules! dbl {
     ($x0:ident, $x1:ident, $x2:ident, $x3:ident, $m:ident) => {{
         qr!($x0, $x1, $x2, $x3, $m);
@@ -107,75 +96,13 @@ macro_rules! rounds20 {
     }};
 }
 
-/// One block: twenty rounds, the feed-forward add, and the XOR fused into the
-/// vector domain. `n` is 1..=64, so a whole 64-byte block is four unaligned
-/// 16-byte load/XOR/store pairs with no keystream buffer anywhere.
+/// `inp` and `out` may alias exactly. Writes `len` bytes, 1..=len.
 ///
-/// `#[inline(always)]` because the caller is a per-block loop and a call here
-/// would put the 64-byte result array in memory between rounds.
-#[inline(always)]
-#[target_feature(enable = "neon")]
-unsafe fn block1(
-    c0: uint32x4_t,
-    k0: uint32x4_t,
-    k1: uint32x4_t,
-    o3: uint32x4_t,
-    m: uint8x16_t,
-    inp: *const u8,
-    out: *mut u8,
-    n: usize,
-) {
-    let (mut x0, mut x1, mut x2, mut x3) = (c0, k0, k1, o3);
-    rounds20!(x0, x1, x2, x3, m);
-    let f0 = vaddq_u32(x0, c0);
-    let f1 = vaddq_u32(x1, k0);
-    let f2 = vaddq_u32(x2, k1);
-    let f3 = vaddq_u32(x3, o3);
-    if n >= 16 {
-        vst1q_u8(out, veorq_u8(vld1q_u8(inp), vreinterpretq_u8_u32(f0)));
-    }
-    if n >= 32 {
-        vst1q_u8(
-            out.add(16),
-            veorq_u8(vld1q_u8(inp.add(16)), vreinterpretq_u8_u32(f1)),
-        );
-    }
-    if n >= 48 {
-        vst1q_u8(
-            out.add(32),
-            veorq_u8(vld1q_u8(inp.add(32)), vreinterpretq_u8_u32(f2)),
-        );
-    }
-    if n >= 64 {
-        vst1q_u8(
-            out.add(48),
-            veorq_u8(vld1q_u8(inp.add(48)), vreinterpretq_u8_u32(f3)),
-        );
-    }
-    // Fewer than 16 bytes left after the last whole 16-byte chunk: spill one
-    // chunk of keystream and finish scalar. At most 15 iterations.
-    let full = n & !15;
-    if full < n {
-        let mut ks = [0u8; 16];
-        vst1q_u8(
-            ks.as_mut_ptr(),
-            vreinterpretq_u8_u32(match full {
-                0 => f0,
-                16 => f1,
-                32 => f2,
-                _ => f3,
-            }),
-        );
-        let mut i = full;
-        while i < n {
-            *out.add(i) = *inp.add(i) ^ ks[i & 15];
-            i += 1;
-        }
-    }
-}
-
-/// `inp` and `out` may alias exactly. `start` is the block counter.
-/// IETF counters wrap at 2^32 blocks, matching the crate's 64-bit state.
+/// The round body is written out once, inside the loop, and serves whole blocks
+/// and a short last block alike: `n` is how many of this block's 64 bytes are
+/// wanted, and the four branches in the epilogue are the only difference. A
+/// separate tail path would be a second copy of the same 400 instructions for a
+/// case that is one comparison wide.
 #[target_feature(enable = "neon")]
 pub unsafe fn stream_xor(
     key32: &[u8; 32],
@@ -191,17 +118,63 @@ pub unsafe fn stream_xor(
     let k1 = vld1q_u32(st.as_ptr().add(8));
     let m = vld1q_u8(ROT8.as_ptr());
     let mut off = 0usize;
-    while off + 64 <= len {
-        let ctr = (start + (off / 64) as u64) as u32;
-        st[12] = ctr;
-        let x3 = vld1q_u32(st.as_ptr().add(12));
-        block1(c0, k0, k1, x3, m, inp.add(off), out.add(off), 64);
-        off += 64;
-    }
-    if off < len {
-        let ctr = (start + (off / 64) as u64) as u32;
-        st[12] = ctr;
-        let x3 = vld1q_u32(st.as_ptr().add(12));
-        block1(c0, k0, k1, x3, m, inp.add(off), out.add(off), len - off);
+    while off < len {
+        let n = core::cmp::min(64, len - off);
+        st[12] = (start + (off / 64) as u64) as u32;
+        let o3 = vld1q_u32(st.as_ptr().add(12));
+
+        let (mut x0, mut x1, mut x2, mut x3) = (c0, k0, k1, o3);
+        rounds20!(x0, x1, x2, x3, m);
+        let f0 = vaddq_u32(x0, c0);
+        let f1 = vaddq_u32(x1, k0);
+        let f2 = vaddq_u32(x2, k1);
+        let f3 = vaddq_u32(x3, o3);
+
+        if n >= 16 {
+            vst1q_u8(
+                out.add(off),
+                veorq_u8(vld1q_u8(inp.add(off)), vreinterpretq_u8_u32(f0)),
+            );
+        }
+        if n >= 32 {
+            vst1q_u8(
+                out.add(off + 16),
+                veorq_u8(vld1q_u8(inp.add(off + 16)), vreinterpretq_u8_u32(f1)),
+            );
+        }
+        if n >= 48 {
+            vst1q_u8(
+                out.add(off + 32),
+                veorq_u8(vld1q_u8(inp.add(off + 32)), vreinterpretq_u8_u32(f2)),
+            );
+        }
+        if n >= 64 {
+            vst1q_u8(
+                out.add(off + 48),
+                veorq_u8(vld1q_u8(inp.add(off + 48)), vreinterpretq_u8_u32(f3)),
+            );
+        }
+        // Fewer than 16 bytes left after the last whole 16-byte chunk: spill one
+        // chunk of keystream and finish scalar. At most 15 iterations, and only
+        // ever on the last block of a message.
+        let full = n & !15;
+        if full < n {
+            let mut ks = [0u8; 16];
+            vst1q_u8(
+                ks.as_mut_ptr(),
+                vreinterpretq_u8_u32(match full {
+                    0 => f0,
+                    16 => f1,
+                    32 => f2,
+                    _ => f3,
+                }),
+            );
+            let mut i = full;
+            while i < n {
+                *out.add(off + i) = *inp.add(off + i) ^ ks[i & 15];
+                i += 1;
+            }
+        }
+        off += n;
     }
 }
