@@ -191,3 +191,19 @@ pub unsafe fn stream_xor(
 ) {
     crate_xor(key32, nonce12, start_block, inp, out, len);
 }
+
+#[cfg(not(target_arch = "aarch64"))]
+#[allow(dead_code)]
+pub unsafe fn stream_xor_wide(k: &[u8; 32], n: &[u8; 12], s: u64, i: *const u8, o: *mut u8, l: usize) {
+    crate_xor(k, n, s, i, o, l);
+}
+#[cfg(not(target_arch = "aarch64"))]
+#[allow(dead_code)]
+pub unsafe fn stream_xor_guarded(k: &[u8; 32], n: &[u8; 12], s: u64, i: *const u8, o: *mut u8, l: usize) {
+    crate_xor(k, n, s, i, o, l);
+}
+#[cfg(not(target_arch = "aarch64"))]
+#[allow(dead_code)]
+pub unsafe fn stream_xor_short2(k: &[u8; 32], n: &[u8; 12], s: u64, i: *const u8, o: *mut u8, l: usize) {
+    crate_xor(k, n, s, i, o, l);
+}

@@ -101,14 +101,6 @@ fn verify_chacha(key: &[u8; 32], nonce: &[u8; 12]) -> usize {
             c.seek(start * 64);
             c.apply_keystream(&mut want);
 
-            for (name, f) in [
-                ("wide", chacha::stream_xor as unsafe fn(_, _, _, _, _, _) -> ()),
-                ("guarded", chacha::stream_xor_guarded as unsafe fn(_, _, _, _, _, _) -> ()),
-                ("short2", chacha::stream_xor_short2 as unsafe fn(_, _, _, _, _, _) -> ()),
-            ] {
-                let _ = name;
-                let _ = f;
-            }
             let mut got = inp.clone();
             unsafe {
                 chacha::stream_xor(
