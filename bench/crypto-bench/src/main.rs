@@ -101,6 +101,14 @@ fn verify_chacha(key: &[u8; 32], nonce: &[u8; 12]) -> usize {
             c.seek(start * 64);
             c.apply_keystream(&mut want);
 
+            for (name, f) in [
+                ("wide", chacha::stream_xor as unsafe fn(_, _, _, _, _, _) -> ()),
+                ("guarded", chacha::stream_xor_guarded as unsafe fn(_, _, _, _, _, _) -> ()),
+                ("short2", chacha::stream_xor_short2 as unsafe fn(_, _, _, _, _, _) -> ()),
+            ] {
+                let _ = name;
+                let _ = f;
+            }
             let mut got = inp.clone();
             unsafe {
                 chacha::stream_xor(
@@ -113,6 +121,32 @@ fn verify_chacha(key: &[u8; 32], nonce: &[u8; 12]) -> usize {
                 )
             };
             assert_eq!(want, got, "combined core differs: start {start} len {len}");
+
+            let mut g2 = inp.clone();
+            unsafe {
+                chacha::stream_xor_guarded(
+                    key,
+                    nonce,
+                    start,
+                    inp.as_ptr(),
+                    g2.as_mut_ptr(),
+                    *len,
+                )
+            };
+            assert_eq!(want, g2, "guarded differs: start {start} len {len}");
+
+            let mut g3 = inp.clone();
+            unsafe {
+                chacha::stream_xor_short2(
+                    key,
+                    nonce,
+                    start,
+                    inp.as_ptr(),
+                    g3.as_mut_ptr(),
+                    *len,
+                )
+            };
+            assert_eq!(want, g3, "short2 differs: start {start} len {len}");
 
             let mut p = inp.clone();
             chacha::portable::stream_xor(key, nonce, start, &inp, &mut p, *len);
@@ -130,6 +164,8 @@ fn bench_chacha(out: &mut String, key: &[u8; 32], nonce: &[u8; 12]) {
         let inp: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
         let mut o_base = vec![0u8; len];
         let mut o_new = vec![0u8; len];
+        let mut o_g = vec![0u8; len];
+        let mut o_s = vec![0u8; len];
         let iters = iters_for(len);
 
         let mut v0 = || {
@@ -139,22 +175,31 @@ fn bench_chacha(out: &mut String, key: &[u8; 32], nonce: &[u8; 12]) {
         let mut v1 = || unsafe {
             chacha::stream_xor(key, nonce, 0, inp.as_ptr(), o_new.as_mut_ptr(), len)
         };
-        let r = bench_all(iters, &mut [&mut v0, &mut v1]);
-        rows.push((len, r[0], r[1], r[0] / r[1]));
+        let mut vg = || unsafe {
+            chacha::stream_xor_guarded(key, nonce, 0, inp.as_ptr(), o_g.as_mut_ptr(), len)
+        };
+        let mut vs = || unsafe {
+            chacha::stream_xor_short2(key, nonce, 0, inp.as_ptr(), o_s.as_mut_ptr(), len)
+        };
+        let r = bench_all(iters, &mut [&mut v0, &mut v1, &mut vg, &mut vs]);
+        rows.push((len, r[0], r[1], r[0] / r[1], r[0] / r[2], r[0] / r[3]));
     }
 
     let _ = writeln!(out, "### ChaCha20 keystream\n");
-    let _ = writeln!(out, "| len | crate `chacha20` 0.9.1 | proposed core | speedup |");
-    let _ = writeln!(out, "|---:|---:|---:|---:|");
-    for (len, b, n, sp) in &rows {
-        let _ = writeln!(out, "| {len} | {b:.0} ns | {n:.0} ns | **{sp:.2}x** |");
+    let _ = writeln!(out, "| len | crate 0.9.1 | A wide ns | A wide | B guarded ns | B guarded | C short2 ns | C short2 |");
+    let _ = writeln!(out, "|---:|---:|---:|---:|---:|---:|---:|---:|");
+    for (len, b, n, sp, spg, sps) in &rows {
+        let _ = writeln!(
+            out,
+            "| {len} | {b:.0} ns | {n:.0} | **{sp:.2}x** | {n:.0} | **{spg:.2}x** | {n:.0} | **{sps:.2}x** |"
+        );
     }
     let _ = writeln!(out);
     println!("### ChaCha20 keystream\n");
-    println!("| len | crate 0.9.1 | proposed | speedup |");
-    println!("|---:|---:|---:|---:|");
-    for (len, b, n, sp) in &rows {
-        println!("| {len} | {b:.0} ns | {n:.0} ns | **{sp:.2}x** |");
+    println!("| len | crate | A wide ns | A | B guard ns | B | C s2 ns | C |");
+    println!("|---:|---:|---:|---:|---:|---:|---:|---:|");
+    for (len, b, n, sp, spg, sps) in &rows {
+        println!("| {len} | {b:.0} | {n:.0} | **{sp:.2}x** | {n:.0} | **{spg:.2}x** | {n:.0} | **{sps:.2}x** |");
     }
     println!();
 }

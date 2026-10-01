@@ -98,6 +98,86 @@ pub unsafe fn stream_xor(
     }
 }
 
+/// Policy A: widest core that fits, all the way down. Loses below 128 bytes on
+/// Neoverse (measured 0.74-0.95x), kept here as the comparison arm.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn stream_xor_wide(
+    key32: &[u8; 32],
+    nonce12: &[u8; 12],
+    start_block: u64,
+    inp: *const u8,
+    out: *mut u8,
+    len: usize,
+) {
+    stream_xor(key32, nonce12, start_block, inp, out, len)
+}
+
+/// Policy B: hand everything under 128 bytes to the crate. Below the crossover
+/// the 1-block core is a measured loss, so the honest move is to not run it.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn stream_xor_guarded(
+    key32: &[u8; 32],
+    nonce12: &[u8; 12],
+    start_block: u64,
+    inp: *const u8,
+    out: *mut u8,
+    len: usize,
+) {
+    if len < 128 {
+        crate_xor(key32, nonce12, start_block, inp, out, len);
+        return;
+    }
+    stream_xor(key32, nonce12, start_block, inp, out, len)
+}
+
+/// Policy C: use the 2-block core for 64-127 bytes too, writing the partial
+/// group through a stack buffer. Spends two blocks of rounds on one block, but
+/// only if the wider core's setup is cheaper than the 1-block core's whole call.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn stream_xor_short2(
+    key32: &[u8; 32],
+    nonce12: &[u8; 12],
+    start_block: u64,
+    inp: *const u8,
+    out: *mut u8,
+    len: usize,
+) {
+    if len < 64 {
+        crate_xor(key32, nonce12, start_block, inp, out, len);
+        return;
+    }
+    let groups = len / 512;
+    unsafe { neon8::stream_xor_bulk(key32, nonce12, start_block, inp, out, groups) };
+    let mut done = groups * 512;
+    while len - done >= 256 {
+        unsafe {
+            neon4::xor_group(key32, nonce12, start_block + (done as u64) / 64,
+                             inp.add(done), out.add(done))
+        };
+        done += 256;
+    }
+    if len - done >= 128 {
+        unsafe {
+            neon2::xor_group(key32, nonce12, start_block + (done as u64) / 64,
+                             inp.add(done), out.add(done))
+        };
+        done += 128;
+    }
+    if len > done {
+        // 64-127 bytes left: run the 2-block core, keep what fits.
+        let n = len - done;
+        let mut tmp = [0u8; 128];
+        unsafe {
+            neon2::xor_group(key32, nonce12, start_block + (done as u64) / 64,
+                             inp.add(done), tmp.as_mut_ptr())
+        };
+        core::ptr::copy_nonoverlapping(tmp.as_ptr(), out.add(done), n);
+    }
+}
+
 /// Non-aarch64: the crate already runtime-detects AVX2/SSE2 here, so there is
 /// nothing to add and nothing to regress.
 #[cfg(not(target_arch = "aarch64"))]
