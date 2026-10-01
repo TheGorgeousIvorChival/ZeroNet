@@ -33,7 +33,15 @@ fn compress(state: &mut [u32; 8], blk: &[u8; 64]) {
     w[13] = u32::from_be_bytes([blk[52], blk[53], blk[54], blk[55]]);
     w[14] = u32::from_be_bytes([blk[56], blk[57], blk[58], blk[59]]);
     w[15] = u32::from_be_bytes([blk[60], blk[61], blk[62], blk[63]]);
-    let (mut s0, mut s1, mut ch, mut maj, mut t1, mut t2) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    // Deferred initialisation: every one of these is written before its first
+    // read in the first round, so seeding them with zeros only produced
+    // "value assigned is never read" warnings.
+    let mut s0;
+    let mut s1;
+    let mut ch;
+    let mut maj;
+    let mut t1;
+    let mut t2;
     s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
     ch = (e & f) ^ ((!e) & g);
     t1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(0x428a2f98u32).wrapping_add(w[0]);

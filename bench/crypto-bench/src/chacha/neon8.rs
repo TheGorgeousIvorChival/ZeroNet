@@ -214,6 +214,7 @@ fn initial_state(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u32; 16] {
 /// enforces this and returns 3 otherwise, so in-crate callers uphold it
 /// by construction; a violation panics inside the crate (loud, and only
 /// reachable by mis-calling this private helper).
+#[allow(dead_code)]
 fn crate_xor(
     key: &[u8; 32],
     nonce: &[u8; 12],
@@ -255,6 +256,7 @@ fn crate_xor(
 ///
 /// XOR the ChaCha20 keystream (IETF, 96-bit `nonce12`, first block
 /// `start_block`) into `out`, reading source bytes from `inp`.
+#[allow(dead_code)]
 pub unsafe fn stream_xor(
     key32: &[u8; 32],
     nonce12: &[u8; 12],

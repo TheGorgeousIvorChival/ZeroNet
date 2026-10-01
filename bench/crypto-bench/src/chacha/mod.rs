@@ -5,6 +5,8 @@
 //! could overflow. Every byte therefore goes through NEON, which is what makes
 //! the win hold at every length instead of only from 512 bytes up.
 pub mod neon1;
+pub mod neon2;
+pub mod neon4;
 pub mod neon8;
 pub mod portable;
 
@@ -16,15 +18,15 @@ pub fn crate_xor(
     key32: &[u8; 32],
     nonce12: &[u8; 12],
     start_block: u64,
-    inp: *const u8,
+    _inp: *const u8,
     out: *mut u8,
     len: usize,
 ) {
-    let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(nonce12);
-    nonce[4..8].copy_from_slice(&((start_block & 0xffff_ffff) as u32).to_le_bytes());
-    nonce[8..12].copy_from_slice(&((start_block >> 32) as u32).to_le_bytes());
-    let mut c = ChaCha20::new(ChaKey::from_slice(key32), ChaNonce12::from_slice(&nonce));
+    // The IETF variant's 12-byte nonce is words 13..15 only; the 64-bit block
+    // counter is separate state reached through `seek`. Stuffing the counter
+    // into the nonce corrupts it -- that bug only showed up on x86_64, where
+    // this is the only path taken.
+    let mut c = ChaCha20::new(ChaKey::from_slice(key32), ChaNonce12::from_slice(nonce12));
     c.seek(start_block * 64);
     let dst = unsafe { core::slice::from_raw_parts_mut(out, len) };
     c.apply_keystream(dst);
@@ -50,18 +52,47 @@ pub unsafe fn stream_xor(
         crate_xor(key32, nonce12, start_block, inp, out, len);
         return;
     }
+    // 8-way for the 512-byte groups, then 4-way for whole 256-byte groups,
+    // then 1-block for whatever is left. Every byte goes through NEON.
     let groups = len / 512;
     unsafe { neon8::stream_xor_bulk(key32, nonce12, start_block, inp, out, groups) };
-    let bulk = groups * 512;
-    if len > bulk {
+    let mut done = groups * 512;
+
+    while len - done >= 256 {
+        unsafe {
+            neon4::xor_group(
+                key32,
+                nonce12,
+                start_block + (done as u64) / 64,
+                inp.add(done),
+                out.add(done),
+            )
+        };
+        done += 256;
+    }
+
+    while len - done >= 128 {
+        unsafe {
+            neon2::xor_group(
+                key32,
+                nonce12,
+                start_block + (done as u64) / 64,
+                inp.add(done),
+                out.add(done),
+            )
+        };
+        done += 128;
+    }
+
+    if len > done {
         unsafe {
             neon1::stream_xor(
                 key32,
                 nonce12,
-                start_block + (bulk as u64) / 64,
-                inp.add(bulk),
-                out.add(bulk),
-                len - bulk,
+                start_block + (done as u64) / 64,
+                inp.add(done),
+                out.add(done),
+                len - done,
             )
         };
     }
