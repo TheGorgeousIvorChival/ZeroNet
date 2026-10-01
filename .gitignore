@@ -74,3 +74,7 @@ CHANGELOG*
 **/*-ideas.md
 # The ignore file itself (root only, so nested ones keep working)
 /.gitignore
+
+# crypto-bench experiment harness
+bench/crypto-bench/target/
+bench/crypto-bench/report.md

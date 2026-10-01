@@ -1,0 +1,73 @@
+name: crypto bench
+
+# Experiment harness, not shipped code: it measures the proposed ChaCha20/SHA
+# cores on real hardware before any PR exists. Deliberately not wired into `ci`,
+# which must stay a pass/fail gate on the project's own code.
+on:
+  push:
+    branches: ["bench/**"]
+  workflow_dispatch:
+
+# A second push makes the previous run's answer irrelevant.
+concurrency:
+  group: crypto-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CRYPTO_BENCH_OUT: report.md
+
+jobs:
+  bench:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The arch where the win is claimed: the pinned chacha20 gates its NEON
+          # backend behind `chacha20_force_neon`, which ZeroNet never sets.
+          - name: aarch64-linux (Graviton)
+            runner: ubuntu-24.04-arm
+            rust: stable
+          # The arch where the claim is "no regression": the same crate already
+          # runtime-detects AVX2/SSE2 here.
+          - name: x86_64-linux
+            runner: ubuntu-latest
+            rust: stable
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: cpu
+        run: |
+          echo "### $(uname -m) $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
+          lscpu 2>/dev/null | grep -iE "model name|^flags" | cut -c1-400 >> "$GITHUB_STEP_SUMMARY" || true
+
+      # The bit-identity gate runs first and the job fails on any mismatch, so a
+      # fast-but-wrong core can never be reported as a win.
+      - name: bench
+        run: |
+          cd bench/crypto-bench
+          cargo run --release
+
+      - name: publish report
+        if: always()
+        run: |
+          cd bench/crypto-bench
+          { echo; echo '```'; cat report.md 2>/dev/null || echo "no report produced"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crypto-bench-${{ matrix.name }}
+          path: bench/crypto-bench/report.md
+          if-no-files-found: warn
