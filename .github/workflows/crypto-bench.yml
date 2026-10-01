@@ -111,24 +111,38 @@ jobs:
       # Committing the report back is what makes these numbers reviewable: the
       # artifact CDN was not reachable from every network this gets read on, and
       # "every platform" is not a claim anyone can check against a table that
-      # only two of the four runners managed to write down. All four push to the
-      # same branch, so this races itself and has to rebase onto whatever landed
-      # while it was running; a plain `git push` loses that race about half the
-      # time and the loser is exactly one of the platforms whose number nobody
-      # has read. It is a convenience step, not the measurement, so it retries
-      # and then gives up rather than failing the job.
+      # only two of the four runners managed to write down.
+      #
+      # Two things make that step reliable, and both were found the hard way.
+      # `actions/checkout` leaves a detached HEAD, so committing and pushing from
+      # there fails, and retrying with a rebase makes it worse: the rebase tries
+      # to apply a commit the branch already contains. And all four runners push
+      # to the same branch, so whoever finishes first wins and the rest have to
+      # rebase onto whatever landed while they were measuring. Each runner owns
+      # a different report file, so that rebase is a fast-forward in practice --
+      # but only if it is a rebase onto the branch, not onto itself.
+      #
+      # It is a convenience step, not the measurement, so it retries and then
+      # gives up rather than failing the job.
       - name: commit report
         if: always()
         continue-on-error: true
         shell: bash
         run: |
           cd bench/crypto-bench
-          mkdir -p reports
-          cp report.md "reports/${{ matrix.report }}.md"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          attach() {
+            git fetch -q origin
+            git checkout -q -B "$GITHUB_REF_NAME" "origin/$GITHUB_REF_NAME"
+            mkdir -p reports
+            cp report.md "reports/$REPORT.md"
+          }
+          export GITHUB_REF_NAME="${{ github.ref_name }}"
+          export REPORT="${{ matrix.report }}"
+          attach
           for attempt in 1 2 3 4 5; do
-            git add "reports/${{ matrix.report }}.md"
+            git add "reports/$REPORT.md"
             if git diff --cached --quiet; then
               echo "no change"
               exit 0
@@ -139,11 +153,8 @@ jobs:
                 exit 0
               fi
             fi
-            echo "push lost the race on attempt $attempt; rebasing"
-            git rebase --abort >/dev/null 2>&1 || true
-            git reset --hard HEAD >/dev/null
-            cp report.md "reports/${{ matrix.report }}.md"
-            git pull --rebase --autostash -q origin HEAD || git pull --rebase -q
+            echo "push lost the race on attempt $attempt; rebasing onto the new tip"
+            attach
           done
           echo "gave up pushing the report; it is in the job summary and the artifact"
 
