@@ -171,19 +171,68 @@ fn bench_chacha(out: &mut String, key: &[u8; 32], nonce: &[u8; 12]) {
             let mut c = ChaCha20::new(key.into(), nonce.into());
             c.apply_keystream(std::hint::black_box(&mut o_base));
         };
+        // Every pointer goes through black_box. Without this the candidate
+        // writes to a buffer nothing ever reads, so on a target where the core
+        // inlines to the same code as the baseline LLVM deletes the whole call:
+        // that is how an earlier run reported 111863x on x86_64.
         let mut v1 = || unsafe {
-            chacha::stream_xor(key, nonce, 0, inp.as_ptr(), o_new.as_mut_ptr(), len)
+            chacha::stream_xor(
+                key,
+                nonce,
+                0,
+                std::hint::black_box(inp.as_ptr()),
+                std::hint::black_box(o_new.as_mut_ptr()),
+                len,
+            )
         };
         let mut vg = || unsafe {
-            chacha::stream_xor_guarded(key, nonce, 0, inp.as_ptr(), o_g.as_mut_ptr(), len)
+            chacha::stream_xor_guarded(
+                key,
+                nonce,
+                0,
+                std::hint::black_box(inp.as_ptr()),
+                std::hint::black_box(o_g.as_mut_ptr()),
+                len,
+            )
         };
         let mut vs = || unsafe {
-            chacha::stream_xor_short2(key, nonce, 0, inp.as_ptr(), o_s.as_mut_ptr(), len)
+            chacha::stream_xor_short2(
+                key,
+                nonce,
+                0,
+                std::hint::black_box(inp.as_ptr()),
+                std::hint::black_box(o_s.as_mut_ptr()),
+                len,
+            )
         };
         let mut vb = || unsafe {
-            chacha::stream_xor_best(key, nonce, 0, inp.as_ptr(), o_b.as_mut_ptr(), len)
+            chacha::stream_xor_best(
+                key,
+                nonce,
+                0,
+                std::hint::black_box(inp.as_ptr()),
+                std::hint::black_box(o_b.as_mut_ptr()),
+                len,
+            )
         };
         let r = bench_all(iters, &mut [&mut v0, &mut v1, &mut vg, &mut vs, &mut vb]);
+        // Keep the stores observable even if the calls were somehow elided.
+        std::hint::black_box(&o_base);
+        std::hint::black_box(&o_new);
+        std::hint::black_box(&o_g);
+        std::hint::black_box(&o_s);
+        std::hint::black_box(&o_b);
+
+        // On non-aarch64 every policy *is* the crate, so anything but ~1.00x
+        // means the harness is lying rather than the core being fast.
+        #[cfg(not(target_arch = "aarch64"))]
+        for (name, v) in [("A", r[0] / r[1]), ("B", r[0] / r[2]), ("C", r[0] / r[3]), ("D", r[0] / r[4])] {
+            assert!(
+                (0.9..1.1).contains(&v),
+                "harness is broken: policy {name} measured {v:.1}x on a target where it is the crate path"
+            );
+        }
+
         rows.push((len, r[0], r[1], r[0] / r[1], r[0] / r[2], r[0] / r[3], r[0] / r[4]));
     }
 
