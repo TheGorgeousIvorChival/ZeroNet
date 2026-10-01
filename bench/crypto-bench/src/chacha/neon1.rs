@@ -37,18 +37,25 @@ macro_rules! qr {
     }};
 }
 
-/// words 12..15 = (counter, nonce0, nonce1, nonce2)
+/// words 13..15: the nonce half, built once per call.
 #[inline]
 #[target_feature(enable = "neon")]
-unsafe fn tail(ctr: u32, nonce12: &[u8; 12]) -> uint32x4_t {
-    let n0 = u32::from_le_bytes(nonce12[0..4].try_into().unwrap());
-    let n1 = u32::from_le_bytes(nonce12[4..8].try_into().unwrap());
-    let n2 = u32::from_le_bytes(nonce12[8..12].try_into().unwrap());
-    let mut v = vdupq_n_u32(ctr);
+unsafe fn nonce_half(nonce12: &[u8; 12]) -> uint32x4_t {
+    let n0 = u32::from_le_bytes([nonce12[0], nonce12[1], nonce12[2], nonce12[3]]);
+    let n1 = u32::from_le_bytes([nonce12[4], nonce12[5], nonce12[6], nonce12[7]]);
+    let n2 = u32::from_le_bytes([nonce12[8], nonce12[9], nonce12[10], nonce12[11]]);
+    let mut v = vdupq_n_u32(0);
     v = vsetq_lane_u32(n2, v, 3);
     v = vsetq_lane_u32(n1, v, 2);
     v = vsetq_lane_u32(n0, v, 1);
     v
+}
+
+/// words 12..15 = (counter, nonce0, nonce1, nonce2)
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn tail(base: uint32x4_t, ctr: u32) -> uint32x4_t {
+    vsetq_lane_u32(ctr, base, 0)
 }
 
 #[inline]
@@ -93,12 +100,13 @@ pub unsafe fn stream_xor(
     let x0 = vld1q_u32(CONSTS.as_ptr());
     let x1 = vld1q_u32(key32.as_ptr() as *const u32);
     let x2 = vld1q_u32(key32.as_ptr().add(4) as *const u32);
+    let base = nonce_half(nonce12);
     let mut off = 0usize;
     // Whole blocks: fuse the XOR in the vector domain -- no keystream buffer,
     // no byte loop, and vld1q_u8/vst1q_u8 are unaligned-safe.
     while off + 64 <= len {
         let ctr = (start + (off / 64) as u64) as u32;
-        let f = rounds(x0, x1, x2, tail(ctr, nonce12));
+        let f = rounds(x0, x1, x2, tail(base, ctr));
         vst1q_u8(
             out.add(off),
             veorq_u8(vld1q_u8(inp.add(off)), vreinterpretq_u8_u32(f[0])),
@@ -121,7 +129,7 @@ pub unsafe fn stream_xor(
     // the indexed version spent more time on bookkeeping than the 20 rounds.
     if off < len {
         let ctr = (start + (off / 64) as u64) as u32;
-        let f = rounds(x0, x1, x2, tail(ctr, nonce12));
+        let f = rounds(x0, x1, x2, tail(base, ctr));
         let n = len - off;
         if n >= 16 {
             vst1q_u8(out.add(off), veorq_u8(vld1q_u8(inp.add(off)), vreinterpretq_u8_u32(f[0])));

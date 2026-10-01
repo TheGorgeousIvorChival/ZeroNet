@@ -77,8 +77,12 @@ fn iters_for(n: usize) -> u64 {
 
 // ------------------------------------------------------------------- chacha20
 
+// Dense around 96-256: that is where the 1-block core stops losing and the
+// 2-block core takes over, and the exact crossover has to come from measurement
+// rather than from a guess.
 const LENS: &[usize] = &[
-    16, 32, 63, 64, 65, 128, 192, 256, 320, 448, 512, 576, 1024, 4096, 16384, 65536,
+    16, 32, 48, 63, 64, 65, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 288, 320, 384, 448, 512,
+    576, 640, 768, 1024, 4096, 16384, 65536,
 ];
 
 fn verify_chacha(key: &[u8; 32], nonce: &[u8; 12]) -> usize {

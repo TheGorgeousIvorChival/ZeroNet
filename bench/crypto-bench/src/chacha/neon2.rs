@@ -29,20 +29,27 @@ unsafe fn rotl7(v: uint32x4_t) -> uint32x4_t {
 }
 
 
-/// 20 rounds over 2 states at once, feed-forward included.
-/// words 12..15 = (counter, nonce0, nonce1, nonce2)
+/// words 13..15: the nonce half, built once per call.
 #[inline]
 #[target_feature(enable = "neon")]
-unsafe fn tail(ctr: u32, nonce12: &[u8; 12]) -> uint32x4_t {
-    let n0 = u32::from_le_bytes(nonce12[0..4].try_into().unwrap());
-    let n1 = u32::from_le_bytes(nonce12[4..8].try_into().unwrap());
-    let n2 = u32::from_le_bytes(nonce12[8..12].try_into().unwrap());
-    let mut v = vdupq_n_u32(ctr);
+unsafe fn nonce_half(nonce12: &[u8; 12]) -> uint32x4_t {
+    let n0 = u32::from_le_bytes([nonce12[0], nonce12[1], nonce12[2], nonce12[3]]);
+    let n1 = u32::from_le_bytes([nonce12[4], nonce12[5], nonce12[6], nonce12[7]]);
+    let n2 = u32::from_le_bytes([nonce12[8], nonce12[9], nonce12[10], nonce12[11]]);
+    let mut v = vdupq_n_u32(0);
     v = vsetq_lane_u32(n2, v, 3);
     v = vsetq_lane_u32(n1, v, 2);
     v = vsetq_lane_u32(n0, v, 1);
     v
 }
+
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn tail(base: uint32x4_t, ctr: u32) -> uint32x4_t {
+    vsetq_lane_u32(ctr, base, 0)
+}
+
+/// 20 rounds over 2 states at once, feed-forward included.
 
 #[inline]
 #[target_feature(enable = "neon")]
@@ -547,6 +554,7 @@ pub unsafe fn xor_group(
     out: *mut u8,
 ) {
     let cs = vld1q_u32(CONSTS.as_ptr());
+    let base = nonce_half(nonce12);
     let k0 = vld1q_u32(key32.as_ptr() as *const u32);
     let k1 = vld1q_u32(key32.as_ptr().add(4) as *const u32);
     let mut st = [cs; 8];
@@ -555,7 +563,7 @@ pub unsafe fn xor_group(
         let o = b * 4;
         st[o + 1] = k0;
         st[o + 2] = k1;
-        st[o + 3] = tail((start + b as u64) as u32, nonce12);
+        st[o + 3] = tail(base, (start + b as u64) as u32);
         b += 1;
     }
     let f = rounds_two(st);
