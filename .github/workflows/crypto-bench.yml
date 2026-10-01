@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write  # only to commit reports back to the bench branch
 
 env:
   CARGO_TERM_COLOR: always
@@ -71,3 +71,21 @@ jobs:
           name: crypto-bench-${{ matrix.name }}
           path: bench/crypto-bench/report.md
           if-no-files-found: warn
+
+      # Committing the report back is what makes these numbers reviewable: the
+      # artifact CDN was not reachable from every network this gets read on.
+      - name: commit report
+        if: always()
+        run: |
+          cd bench/crypto-bench
+          mkdir -p reports
+          cp report.md "reports/${{ matrix.runner }}.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "reports/${{ matrix.runner }}.md"
+          if git diff --cached --quiet; then
+            echo "no change"
+          else
+            git commit -m "bench report from ${{ matrix.name }}"
+            git push
+          fi
