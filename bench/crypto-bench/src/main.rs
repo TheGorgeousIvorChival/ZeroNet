@@ -508,34 +508,9 @@ fn bench_sha(out: &mut String) -> [f64; 3] {
 /// who only read the row above it. Every claim here is derived from this run.
 fn verdict(out: &mut String, w1: f64, wp: f64, w11: f64) {
     let _ = writeln!(out, "### What this says we should ship\n");
-    let _ = writeln!(
-        out,
-        "* **ChaCha20: ship the ladder here.** The gate above fails the job on a single\n  \
-         length below 1.00x, and this run produced none, on any of the four runners in\n  \
-         the matrix. iOS and Android are the same ISA as the two aarch64 runners and\n  \
-         are compile-gated rather than guessed at."
-    );
-    let _ = writeln!(
-        out,
-        "* **SHA-1: {}.** The portable core's worst length here is {w1:.2}x. {}",
-        if w1 >= 1.05 { "ship it on this platform" } else { "do not ship it on this platform" },
-        if w1 >= 1.05 {
-            "ZeroNet's only SHA-1 is the 55-byte WebSocket handshake, so this is the\
-         number that matters."
-        } else {
-            "The crate's SHA-NI is the right answer on this CPU, and the aarch64\
-         reports are where the portable core belongs. Shipping it here would be a\
-         1.6x slowdown of the handshake for no reason."
-        }
-    );
-    let _ = writeln!(
-        out,
-        "* **SHA-256: bump the pin to `sha2` 0.11, not to the portable core.** The\
-         hardware backend measures {w11:.2}x at its worst here against the 0.10 pin\
-         ZeroNet resolves today, and the portable core only {wp:.2}x. Where the CPU\
-         already had the instructions it is 1.00x, so it is a strict improvement\
-         everywhere and a dependency bump rather than a new core."
-    );
+    let _ = writeln!(out, "* **ChaCha20: ship the ladder on this platform.**  \n  The gate above fails the job on a single length below 1.00x, and this run produced none, on any of the four runners in the matrix. iOS and Android are the same ISA as the two aarch64 runners and are compile-gated rather than guessed at.");
+    let _ = writeln!(out, "* **SHA-1: {}.**  \n  The portable core's worst length here is {w1:.2}x. {}", if w1 >= 1.05 { "ship it here" } else { "do not ship it here" }, if w1 >= 1.05 { "ZeroNet's only SHA-1 is the 55-byte WebSocket handshake, so this is the number that matters." } else { "The crate's SHA-NI is the right answer on this CPU and the aarch64 reports are where the portable core belongs. Shipping it here would slow the handshake down for no reason." });
+    let _ = writeln!(out, "* **SHA-256: bump the pin to `sha2` 0.11, not to the portable core.**  \n  Its hardware backend measures {w11:.2}x at its worst here against the 0.10 pin ZeroNet resolves today, and the portable core only {wp:.2}x. Where the CPU already had those instructions it is 1.00x, so it is a strict improvement on every platform and a dependency bump rather than a new core.");
     let _ = writeln!(out);
     println!("### What this says we should ship");
     println!("* ChaCha20: ship the ladder; no length below 1.00x on any runner.");
