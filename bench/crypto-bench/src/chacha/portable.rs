@@ -362,3 +362,28 @@ pub fn stream_xor(key: &[u8; 32], nonce: &[u8; 12], start: u64, inp: &[u8], out:
         for i in 0..n { out[off + i] = inp[off + i] ^ ks[i]; }
     }
 }
+
+/// The same thing over raw pointers, so the dispatcher can hand this core an
+/// `inp == out` in-place buffer. Slices cannot: a `&[u8]` and a `&mut [u8]` over
+/// one allocation are a stacked-borrows violation even when every access through
+/// them is read-before-write.
+#[inline]
+pub unsafe fn stream_xor_raw(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    start: u64,
+    inp: *const u8,
+    out: *mut u8,
+    len: usize,
+) {
+    let k: [u32; 8] = std::array::from_fn(|i| u32::from_le_bytes(key[i * 4..i * 4 + 4].try_into().unwrap()));
+    let n: [u32; 3] = std::array::from_fn(|i| u32::from_le_bytes(nonce[i * 4..i * 4 + 4].try_into().unwrap()));
+    let mut ks = [0u8; 64];
+    let mut off = 0usize;
+    while off < len {
+        let c = core::cmp::min(64, len - off);
+        block(&k, &n, (start + (off / 64) as u64) as u32, &mut ks);
+        for i in 0..c { *out.add(off + i) = *inp.add(off + i) ^ ks[i]; }
+        off += c;
+    }
+}

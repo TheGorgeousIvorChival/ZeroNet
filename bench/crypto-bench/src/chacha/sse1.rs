@@ -19,22 +19,30 @@
 use core::arch::x86_64::*;
 
 /// `_mm_shuffle_epi32` picks each destination lane from a source lane with two
-/// bits. 0x39 rotates left by one lane, 0x4E by two, 0x93 by three, and 0xB1 is
-/// [1,0,3,2] -- a 32-bit word swapped, which is a rotate left by 16.
+/// bits, so 0x39 rotates left by one lane, 0x4E by two and 0x93 by three. It
+/// cannot swap the two halves *inside* a lane, which is what rotl16 is: that
+/// needs a 16-bit granularity shuffle, `pshuflw` then `pshufhw`, each of which
+/// reverses the 16-bit halves of all four 32-bit words in its quadword.
+macro_rules! rotl16 {
+    ($v:expr) => {
+        _mm_shufflehi_epi16::<0xB1>(_mm_shufflelo_epi16::<0xB1>($v))
+    };
+}
+
 const ROT1: i32 = 0x39;
 const ROT2: i32 = 0x4E;
 const ROT3: i32 = 0x93;
-const ROT16: i32 = 0xB1;
 
 macro_rules! qr {
     ($a:ident, $b:ident, $c:ident, $d:ident) => {{
         $a = _mm_add_epi32($a, $b);
-        $d = _mm_shuffle_epi32::<ROT16>(_mm_xor_si128($d, $a));
+        $d = rotl16!(_mm_xor_si128($d, $a));
         $c = _mm_add_epi32($c, $d);
         let t = _mm_xor_si128($b, $c);
         $b = _mm_or_si128(_mm_slli_epi32::<12>(t), _mm_srli_epi32::<20>(t));
         $a = _mm_add_epi32($a, $b);
-        $d = _mm_or_si128(_mm_slli_epi32::<8>(_mm_xor_si128($d, $a)), _mm_srli_epi32::<24>(_mm_xor_si128($d, $a)));
+        let t = _mm_xor_si128($d, $a);
+        $d = _mm_or_si128(_mm_slli_epi32::<8>(t), _mm_srli_epi32::<24>(t));
         $c = _mm_add_epi32($c, $d);
         let t = _mm_xor_si128($b, $c);
         $b = _mm_or_si128(_mm_slli_epi32::<7>(t), _mm_srli_epi32::<25>(t));

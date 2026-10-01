@@ -248,11 +248,8 @@ fn measure(len: usize, key: &[u8; 32], nonce: &[u8; 12], iters: u64) -> [f64; 5]
     };
 
     let r = bench_all(iters, &mut [&mut v0, &mut v1, &mut v2, &mut v3, &mut v4]);
-    drop(v0);
-    drop(v1);
-    drop(v2);
-    drop(v3);
-    drop(v4);
+    // The closures hold copies of the raw pointers, never borrows of the
+    // buffers, so the buffers are free to be read here.
     for b in o.iter() {
         std::hint::black_box(b);
     }
@@ -312,7 +309,11 @@ fn bench_chacha(out: &mut String, key: &[u8; 32], nonce: &[u8; 12]) {
         out,
         "`ladder` is the policy that would ship. `GB/s` is its throughput, because a\n\
          speedup against a baseline that is itself slow says very little about what a\n\
-         caller gets.\n"
+         caller gets. The one-block rung chose the **{}** core on this machine, by\n\
+         measurement at first use; `narrow` is the SIMD one-block core for every byte\n\
+         and `portable` is the scalar one, so the two columns either side of `ladder`\n\
+         are the two things it could have chosen between.\n",
+        chacha::one_block_choice()
     );
     let _ = writeln!(out, "| len | crate ns | crate GB/s | ladder GB/s | speedup | wide | narrow | portable |");
     let _ = writeln!(out, "|---:|---:|---:|---:|---:|---:|---:|---:|");

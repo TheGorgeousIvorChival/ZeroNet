@@ -31,17 +31,25 @@ const ROT8: [i8; 32] = [
     3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14,
 ];
 
-/// Row rotations by 1, 2 and 3 lanes, and the word swap that is rotl16. See
-/// `sse1.rs` for how those five bits are laid out.
+/// Row rotations by 1, 2 and 3 lanes, at 32-bit granularity. rotl16 is not in
+/// this family: `_mm256_shuffle_epi32` moves whole 32-bit lanes and so cannot
+/// swap the halves *inside* one, which is exactly what rotl16 is. That needs the
+/// 16-bit granularity pair, and both of those also work per 128-bit lane, which
+/// is what makes them right here -- each lane is an independent block.
 const ROT1: i32 = 0x39;
 const ROT2: i32 = 0x4E;
 const ROT3: i32 = 0x93;
-const ROT16: i32 = 0xB1;
+
+macro_rules! rotl16 {
+    ($v:expr) => {
+        _mm256_shufflehi_epi16::<0xB1>(_mm256_shufflelo_epi16::<0xB1>($v))
+    };
+}
 
 macro_rules! qr {
     ($a:ident, $b:ident, $c:ident, $d:ident, $m:ident) => {{
         $a = _mm256_add_epi32($a, $b);
-        $d = _mm256_shuffle_epi32::<ROT16>(_mm256_xor_si256($d, $a));
+        $d = rotl16!(_mm256_xor_si256($d, $a));
         $c = _mm256_add_epi32($c, $d);
         let t = _mm256_xor_si256($b, $c);
         $b = _mm256_or_si256(_mm256_slli_epi32::<12>(t), _mm256_srli_epi32::<20>(t));

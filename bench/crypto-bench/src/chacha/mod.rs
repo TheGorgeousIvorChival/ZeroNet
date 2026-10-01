@@ -94,6 +94,128 @@ fn blk(start_block: u64, done: usize) -> u64 {
     start_block + (done as u64) / 64
 }
 
+// ------------------------------------------------- which one-block core wins
+
+/// 0 = not measured yet, 1 = SIMD, 2 = scalar.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+static ONE_BLOCK: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Which one-block core this CPU prefers, measured once and then remembered.
+///
+/// One ChaCha block is twenty rounds of quarter round and every round depends on
+/// the one before it, so a single block has no instruction-level parallelism to
+/// exploit. The only question is which instruction set reaches the end of that
+/// dependency chain first, and that is a property of the microarchitecture, not
+/// of the ISA. Measured on this branch, same code, same `-Os` profile:
+///
+///   * Apple silicon: the SIMD core wins, ~1.11x over the scalar one. Firestorm
+///     has the issue slots to run the row rotations without costing the chain
+///     anything, so four lanes cost the same latency as one.
+///   * Neoverse N1: the scalar core wins, ~1.6x. `vextq_u32` and `vqtbl1q_u8`
+///     sit between every pair of rounds, on the critical path, and N1 has no
+///     second vector pipe to overlap them with. SIMD one block measured 0.66x
+///     against the crate there; the scalar core measured 1.02-1.10x.
+///
+/// Nothing in CPUID distinguishes those two, and ZeroNet ships aarch64 servers,
+/// aarch64 phones and x86_64 desktops, so the dispatcher measures both once
+/// rather than guessing. This is the one place in the branch that decides
+/// anything at runtime instead of at build time, and it is bounded: one
+/// comparison per process, tens of microseconds, then a single relaxed atomic
+/// load per call.
+///
+/// A tie within 5% goes to the scalar core, because it is the architecture
+/// neutral one and its worst case measured here is 0.95x where the SIMD core's
+/// is 0.66x. Being wrong is a performance bug and never a correctness one: both
+/// cores are byte-identical to the crate across every shape the gate covers, and
+/// the gate in `main.rs` runs against whichever one this picked.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+#[inline]
+fn simd_one_block() -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    match ONE_BLOCK.load(Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    let v = if calibrate_simd() { 1 } else { 2 };
+    ONE_BLOCK.store(v, Relaxed);
+    v == 1
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn calibrate_simd() -> bool {
+    use std::time::Instant;
+    const REPS: usize = 3;
+    const N: usize = 128;
+    let key = [0u8; 32];
+    let nonce = [0u8; 12];
+    let src = [7u8; 64];
+    let mut a = [0u8; 64];
+    let mut b = [0u8; 64];
+    let (mut ts, mut tp) = (f64::MAX, f64::MAX);
+    for _ in 0..REPS {
+        let t = Instant::now();
+        for _ in 0..N {
+            unsafe { narrow(&key, &nonce, 0, src.as_ptr(), a.as_mut_ptr(), 64) };
+        }
+        ts = ts.min(t.elapsed().as_secs_f64());
+        let t = Instant::now();
+        for _ in 0..N {
+            unsafe { portable::stream_xor_raw(&key, &nonce, 0, src.as_ptr(), b.as_mut_ptr(), 64) };
+        }
+        tp = tp.min(t.elapsed().as_secs_f64());
+    }
+    // SIMD has to be at least 5% ahead to be worth depending on a measurement.
+    ts * 1.05 < tp
+}
+
+/// What the calibration decided, for the report.
+pub fn one_block_choice() -> &'static str {
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    {
+        // Force the decision so the report states what the bench actually ran.
+        let _ = simd_one_block();
+        if simd_one_block() {
+            "SIMD"
+        } else {
+            "scalar"
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        "n/a (no SIMD core here)"
+    }
+}
+
+/// The narrowest rung, through whichever core this CPU measured as faster.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+unsafe fn one_block(
+    key32: &[u8; 32],
+    nonce12: &[u8; 12],
+    start_block: u64,
+    inp: *const u8,
+    out: *mut u8,
+    len: usize,
+) {
+    if simd_one_block() {
+        unsafe { narrow(key32, nonce12, start_block, inp, out, len) }
+    } else {
+        unsafe { portable::stream_xor_raw(key32, nonce12, start_block, inp, out, len) }
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+unsafe fn one_block(
+    key32: &[u8; 32],
+    nonce12: &[u8; 12],
+    start_block: u64,
+    inp: *const u8,
+    out: *mut u8,
+    len: usize,
+) {
+    crate_xor(key32, nonce12, start_block, inp, out, len);
+}
+
 // ------------------------------------------------------------------ aarch64
 
 #[cfg(target_arch = "aarch64")]
@@ -140,9 +262,9 @@ pub unsafe fn stream_xor(
             unsafe { neon2::xor_group(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), n) };
             done += n;
         } else {
-            // One block, whole or partial. The one-block core writes a short
+            // One block, whole or partial. Either one-block core writes a short
             // block straight out, with no buffer.
-            unsafe { neon1::stream_xor(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), rem) };
+            unsafe { one_block(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), rem) };
             return;
         }
     }
@@ -204,7 +326,7 @@ unsafe fn stream_xor_avx2(
             unsafe { avx2::xor2(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), n) };
             done += n;
         } else {
-            unsafe { sse1::stream_xor(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), rem) };
+            unsafe { one_block(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), rem) };
             return;
         }
     }
