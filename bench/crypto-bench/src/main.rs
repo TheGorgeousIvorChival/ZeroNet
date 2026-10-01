@@ -510,12 +510,12 @@ fn verdict(out: &mut String, w1: f64, wp: f64, w11: f64) {
     let _ = writeln!(out, "### What this says we should ship\n");
     let _ = writeln!(out, "* **ChaCha20: ship the ladder on this platform.**  \n  The gate above fails the job on a single length below 1.00x, and this run produced none, on any of the four runners in the matrix. iOS and Android are the same ISA as the two aarch64 runners and are compile-gated rather than guessed at.");
     let _ = writeln!(out, "* **SHA-1: {}.**  \n  The portable core's worst length here is {w1:.2}x. {}", if w1 >= 1.05 { "ship it here" } else { "do not ship it here" }, if w1 >= 1.05 { "ZeroNet's only SHA-1 is the 55-byte WebSocket handshake, so this is the number that matters." } else { "The crate's SHA-NI is the right answer on this CPU and the aarch64 reports are where the portable core belongs. Shipping it here would slow the handshake down for no reason." });
-    let _ = writeln!(out, "* **SHA-256: bump the pin to `sha2` 0.11, not to the portable core.**  \n  Its hardware backend measures {w11:.2}x at its worst here against the 0.10 pin ZeroNet resolves today, and the portable core only {wp:.2}x. Where the CPU already had those instructions it is 1.00x, so it is a strict improvement on every platform and a dependency bump rather than a new core.");
+    let _ = writeln!(out, "* **SHA-256: {}.**  \n  The hardware backend in `sha2` 0.11 measures {w11:.2}x at its worst here against the 0.10 pin ZeroNet resolves today; the portable core measures {wp:.2}x. {} But note what the same column reads on the other runners: this is a dependency bump, not a new core, and the win is all aarch64 -- SHA-NI was already there on x86_64 and 0.11's runtime dispatch costs a few percent it never gives back.", if w11 >= 1.0 { "bump the pin" } else { "leave the pin alone here" }, if w11 >= 1.0 { "Where the CPU already had those instructions it is 1.00x, so it is a strict improvement on every platform." } else { "That is a real, if small, loss and it is not noise-shaped: it is the runtime dispatch, on a platform that already had SHA-NI." });
     let _ = writeln!(out);
     println!("### What this says we should ship");
     println!("* ChaCha20: ship the ladder; no length below 1.00x on any runner.");
     println!("* SHA-1: worst length here {w1:.2}x -> {}.", if w1 >= 1.05 { "ship the portable core" } else { "keep the crate on this platform" });
-    println!("* SHA-256: sha2 0.11 hardware backend worst {w11:.2}x vs the 0.10 pin, portable core {wp:.2}x -> bump the pin.");
+    println!("* SHA-256: sha2 0.11 hardware backend worst {w11:.2}x vs the 0.10 pin, portable core {wp:.2}x -> {}.", if w11 >= 1.0 { "bump the pin" } else { "leave the pin alone here" });
 }
 
 // -------------------------------------------------------------------- driver

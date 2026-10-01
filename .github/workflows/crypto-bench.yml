@@ -109,9 +109,14 @@ jobs:
           if-no-files-found: warn
 
       # Committing the report back is what makes these numbers reviewable: the
-      # artifact CDN was not reachable from every network this gets read on.
-      # All four arms push to the same branch, so this races itself. It is a
-      # convenience step, not the measurement: never fail the job over it.
+      # artifact CDN was not reachable from every network this gets read on, and
+      # "every platform" is not a claim anyone can check against a table that
+      # only two of the four runners managed to write down. All four push to the
+      # same branch, so this races itself and has to rebase onto whatever landed
+      # while it was running; a plain `git push` loses that race about half the
+      # time and the loser is exactly one of the platforms whose number nobody
+      # has read. It is a convenience step, not the measurement, so it retries
+      # and then gives up rather than failing the job.
       - name: commit report
         if: always()
         continue-on-error: true
@@ -122,13 +127,25 @@ jobs:
           cp report.md "reports/${{ matrix.report }}.md"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "reports/${{ matrix.report }}.md"
-          if git diff --cached --quiet; then
-            echo "no change"
-          else
-            git commit -m "bench report from ${{ matrix.name }}"
-            git push
-          fi
+          for attempt in 1 2 3 4 5; do
+            git add "reports/${{ matrix.report }}.md"
+            if git diff --cached --quiet; then
+              echo "no change"
+              exit 0
+            fi
+            if git commit -q -m "bench report from ${{ matrix.name }}"; then
+              if git push -q; then
+                echo "pushed on attempt $attempt"
+                exit 0
+              fi
+            fi
+            echo "push lost the race on attempt $attempt; rebasing"
+            git rebase --abort >/dev/null 2>&1 || true
+            git reset --hard HEAD >/dev/null
+            cp report.md "reports/${{ matrix.report }}.md"
+            git pull --rebase --autostash -q origin HEAD || git pull --rebase -q
+          done
+          echo "gave up pushing the report; it is in the job summary and the artifact"
 
   # iOS and Android run the same ISA as the two aarch64 runners above, so their
   # throughput would be a guess dressed up as a number. Whether the cores
