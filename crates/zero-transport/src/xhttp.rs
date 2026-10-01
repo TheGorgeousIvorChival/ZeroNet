@@ -2430,6 +2430,56 @@ const CHUNK_PAYLOAD: usize = 16 * 1024;
 /// Room in front of the payload for the hex size line (16 digits + CRLF).
 const CHUNK_HEAD_ROOM: usize = 18;
 
+#[cfg(test)]
+mod chunk_head_tests {
+    use super::{chunk_head, CHUNK_PAYLOAD};
+
+    /// Writing the hex by hand is only worth it if it emits the same bytes as
+    /// the formatting machinery it replaces, so that is checked directly
+    /// rather than against a remembered constant.
+    #[test]
+    fn writes_exactly_what_format_would() {
+        let mut out = [0u8; 6];
+        let mut lengths = Vec::new();
+        for n in (1..=CHUNK_PAYLOAD).chain([0xfff, 0x1000, 0xffff, 0x4000, 0x10000]) {
+            if n > CHUNK_PAYLOAD {
+                continue;
+            }
+            let want = format!("{n:X}\r\n");
+            let start = chunk_head(n, &mut out);
+            assert_eq!(&out[start..], want.as_bytes(), "n {n} (want {want:?})");
+            lengths.push(start);
+        }
+        // 1 to 4 hex digits all occur, so all four alignments are hit.
+        assert_eq!(
+            lengths
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [0, 1, 2, 3].into_iter().collect()
+        );
+    }
+}
+
+/// Write the chunked-encoding size line for `n` bytes into `out` (six bytes,
+/// right-aligned) and return its length: the bytes `format!("{n:X}\r\n")`
+/// produces, without a `String` and the formatting machinery behind it. `n` is
+/// non-zero and at most [`CHUNK_PAYLOAD`], so the line is at most four hex
+/// digits plus CRLF.
+fn chunk_head(n: usize, out: &mut [u8; 6]) -> usize {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    debug_assert!(n > 0 && n <= CHUNK_PAYLOAD);
+    // `n != 0`, so 1..=4.
+    let digits = ((usize::BITS - n.leading_zeros()) as usize).div_ceil(4);
+    let start = out.len() - (digits + 2);
+    for j in 0..digits {
+        out[start + j] = HEX[(n >> (4 * (digits - 1 - j))) & 0xf];
+    }
+    out[out.len() - 2] = b'\r';
+    out[out.len() - 1] = b'\n';
+    start
+}
+
 /// Decode an HTTP/1.1 chunked body from `net` into `app`, up to and including
 /// the terminating zero-size chunk.
 ///
@@ -2508,9 +2558,11 @@ where
                 .await
                 .map_err(|error| format!("XHTTP {what} flush: {error}"));
         }
-        let head = format!("{n:X}\r\n");
-        let start = CHUNK_HEAD_ROOM - head.len();
-        frame[start..CHUNK_HEAD_ROOM].copy_from_slice(head.as_bytes());
+        // Once per 16 KiB chunk of every XHTTP upload and download.
+        let mut head = [0u8; 6];
+        let head_len = chunk_head(n, &mut head);
+        let start = CHUNK_HEAD_ROOM - head_len;
+        frame[start..CHUNK_HEAD_ROOM].copy_from_slice(&head[6 - head_len..]);
         let end = CHUNK_HEAD_ROOM + n;
         frame[end..end + 2].copy_from_slice(b"\r\n");
         net.write_all(&frame[start..end + 2])
