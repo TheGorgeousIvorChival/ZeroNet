@@ -9,6 +9,7 @@
 //! `[u8; 12]` and the tag as a slice -- so moving a call site onto this type is
 //! an import swap and a nonce expression.
 
+use chacha20poly1305::{Error, Tag};
 use poly1305::universal_hash::{KeyInit, UniversalHash};
 use poly1305::Poly1305;
 use zeroize::Zeroize;
@@ -16,18 +17,6 @@ use zeroize::Zeroize;
 use crate::chacha20::xor_keystream;
 
 const TAG_LEN: usize = 16;
-
-/// The only failure this AEAD has: the tag did not verify.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Error;
-
-impl core::fmt::Display for Error {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("ChaCha20Poly1305 authentication failed")
-    }
-}
-
-impl std::error::Error for Error {}
 
 /// A `ChaCha20Poly1305` key. The key is zeroed on drop and never copied except
 /// by `Clone`, which is what the per-direction cipher enums in the Shadowsocks
@@ -61,7 +50,7 @@ impl ChaCha20Poly1305 {
         nonce: &[u8; 12],
         aad: &[u8],
         buf: &mut [u8],
-    ) -> Result<[u8; TAG_LEN], Error> {
+    ) -> Result<Tag, Error> {
         let mut poly = self.authenticator(nonce);
         // RFC 8439 §2.6: the payload is encrypted from counter 1, because
         // counter 0 produced the one-time Poly1305 key.
@@ -83,8 +72,8 @@ impl ChaCha20Poly1305 {
         // A branch on the first differing byte would leak the tag. This walks
         // all sixteen regardless.
         let mut diff = 0u8;
-        for (i, b) in finish(poly).iter().enumerate() {
-            diff |= b ^ tag.get(i).copied().unwrap_or(0);
+        for (b, t) in finish(poly).iter().zip(tag.iter().chain(core::iter::repeat(&0))) {
+            diff |= b ^ t;
         }
         if diff != 0 {
             return Err(Error);
@@ -111,12 +100,12 @@ fn mac(poly: &mut Poly1305, aad: &[u8], ciphertext: &[u8]) {
     poly.update_padded(&lengths.to_le_bytes());
 }
 
-fn finish(poly: Poly1305) -> [u8; TAG_LEN] {
+fn finish(poly: Poly1305) -> Tag {
     let out = poly.finalize();
     let bytes: &[u8] = out.as_ref();
-    let mut tag = [0u8; TAG_LEN];
-    tag.copy_from_slice(bytes);
-    tag
+    let mut raw = [0u8; TAG_LEN];
+    raw.copy_from_slice(bytes);
+    Tag::from(raw)
 }
 
 #[cfg(test)]

@@ -120,10 +120,9 @@ unsafe fn stream_xor(
         return;
     }
     let groups = len / 512;
-    let mut done = 0usize;
+    let mut done = groups * 512;
     if groups > 0 {
         unsafe { neon8::stream_xor_bulk(key32, nonce12, start_block, inp, out, groups) };
-        done = groups * 512;
     }
     loop {
         let rem = len - done;
@@ -209,7 +208,7 @@ unsafe fn stream_xor_avx2(
     len: usize,
 ) {
     let groups = len / 512;
-    let mut done = 0usize;
+    let mut done = groups * 512;
     for g in 0..groups {
         unsafe {
             avx2::xor8(
@@ -221,7 +220,6 @@ unsafe fn stream_xor_avx2(
             )
         };
     }
-    done = groups * 512;
     loop {
         let rem = len - done;
         if rem == 0 {
