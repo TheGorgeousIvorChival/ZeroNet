@@ -151,11 +151,29 @@ def _byte_size() -> None:
     raise AssertionError("a non-numeric size was accepted")
 
 
-@check("every core id in the default list resolves")
+@check("every core is complete enough to start and to validate")
 def _cores() -> None:
+    from zbench import cores
+
     for core_id in caps.DEFAULT_CORES:
         assert core_id in caps.ALL_CORES, core_id
     assert set(caps.PINS) == set(caps.ALL_CORES), "a core has no version pin"
+
+    # A core that names no known command line cannot be started, and the failure
+    # lands in the middle of a run rather than at the start of one. `zray-base`
+    # was exactly that: it existed, it built, and then every cell said "no run
+    # command known for zray-base".
+    for core_id, core in caps.ALL_CORES.items():
+        assert core.cli in caps.KNOWN_CLIS, f"{core_id}: cli={core.cli!r}"
+        argv = cores.run_argv(core, pathlib.Path("/x"), pathlib.Path("/c.json"))
+        assert argv[0] == "/x" and "run" in argv, f"{core_id}: {argv}"
+        check = cores.check_argv(core, pathlib.Path("/x"), pathlib.Path("/c.json"))
+        assert check is not None, f"{core_id}: no config check, so a refusal cannot be recorded"
+        assert check[0] == "/x", f"{core_id}: {check}"
+    # Two cores that share a dialect may still need different command lines.
+    assert caps.get("xray").cli != caps.get("xray-rust").cli, (
+        "xray-core and xray-rust share a dialect and are invoked differently"
+    )
 
 
 @check("the capability table is internally consistent")

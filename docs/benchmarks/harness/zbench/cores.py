@@ -576,19 +576,21 @@ def resolve_all(
 
 
 def run_argv(core: caps.Core, binary: Path, config: Path) -> list[str]:
-    """The argv that runs a config, in each core's own dialect.
+    """The argv that runs a config, in the core's own command line.
 
     `zray` deliberately has no separate server mode: the same `run` subcommand
-    serves whatever inbounds the config declares, which is why one adapter
-    covers both roles.
+    serves whatever inbounds the config declares, which is why one adapter covers
+    both roles. Dispatch is on `Core.cli` rather than on the id, so a core that
+    is a variant of an existing one -- `zray-base` is Zray -- needs no new branch.
     """
-    if core.id in ("zray", "xray-rust"):
+    if core.cli in ("zray", "xray-rust"):
         return [str(binary), "run", "-config", str(config)]
-    if core.id == "xray":
+    if core.cli in ("xray", "singbox"):
         return [str(binary), "run", "-c", str(config)]
-    if core.id == "singbox":
-        return [str(binary), "run", "-c", str(config)]
-    raise SystemExit(f"no run command known for {core.id}")
+    raise SystemExit(
+        f"{core.id} names no known command line (cli={core.cli!r}); known: "
+        f"{', '.join(caps.KNOWN_CLIS)}"
+    )
 
 
 def check_argv(core: caps.Core, binary: Path, config: Path) -> list[str] | None:
@@ -599,13 +601,13 @@ def check_argv(core: caps.Core, binary: Path, config: Path) -> list[str] | None:
     in one line, and the matrix can record *why* a cell is empty instead of
     reporting a connection timeout thirty seconds later.
     """
-    if core.id == "zray":
+    if core.cli == "zray":
         return [str(binary), "check", str(config)]
-    if core.id == "xray":
+    if core.cli == "xray":
         return [str(binary), "run", "-test", "-c", str(config)]
-    if core.id == "singbox":
+    if core.cli == "singbox":
         return [str(binary), "check", "-c", str(config)]
-    if core.id == "xray-rust":
+    if core.cli == "xray-rust":
         return [str(binary), "config", "check", "--config", str(config)]
     return None
 

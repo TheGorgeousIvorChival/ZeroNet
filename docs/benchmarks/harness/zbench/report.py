@@ -79,9 +79,17 @@ MARKERS = {
 }
 
 
+#: Linux reports CPU in clock ticks and macOS `ps` in hundredths, so a sample
+#: below about 10 ms of CPU reads as zero. A table that prints `0.00` there is
+#: claiming the work was free.
+CPU_RESOLUTION_S = 0.010
+
+
 def _fmt(value: float | None, unit: str = "") -> str:
     if value is None:
         return "-"
+    if unit == "s/GB" and value == 0.0:
+        return f"<{CPU_RESOLUTION_S:g}"
     if unit == "Mbit/s":
         return f"{value / 1000:.2f} Gbit/s" if value >= 10_000 else f"{value:,.0f} Mbit/s"
     if unit == "MB resident":
@@ -447,14 +455,25 @@ def render_markdown(result: Result, agg: dict, cover: dict) -> str:
     add("")
     add("Legend: `yes` `partial` `deprecated` `alpha` `prerelease` `removed` `no` `n-a`.")
     add("")
+    # The capability table is about separate projects, so the candidate's own
+    # base build is not a column in it. Its support is the candidate's, and the
+    # run's coverage table above shows that for the build under test.
+    project_ids = [c for c in core_ids if c in caps.project_cores()]
+    project_labels = [cover["cores"].get(c, c) for c in project_ids]
+    if project_ids != core_ids:
+        add(
+            f"`{caps.BASE_ID}` has no column here: it is this project built from "
+            f"another commit, not a separate project."
+        )
+        add("")
     for area in caps.feature_areas():
         rows = [r for r in caps.FEATURES if r.area == area]
         add(f"### {area}")
         add("")
-        add("| Feature | " + " | ".join(labels) + " | Note |")
-        add("|---" * (len(core_ids) + 2) + "|")
+        add("| Feature | " + " | ".join(project_labels) + " | Note |")
+        add("|---" * (len(project_ids) + 2) + "|")
         for row in rows:
-            values = [caps.feature_value(row, c) for c in core_ids]
+            values = [caps.feature_value(row, c) for c in project_ids]
             note = f" {row.note}" if row.note else ""
             add(
                 f"| {row.feature} | " + " | ".join(values) + f" |{note} |"
@@ -469,7 +488,7 @@ def render_markdown(result: Result, agg: dict, cover: dict) -> str:
         "list rather than an impression."
     )
     add("")
-    for core_id in core_ids:
+    for core_id in project_ids:
         core = caps.get(core_id)
         key = "beyond_zray" if core_id != "zray" else "not_in_zray"
         text = core.notes.get(key, "")
@@ -873,8 +892,24 @@ def gate(
     if failures:
         return Gate(
             False,
-            f"worse than the base by more than the tolerance on {len(failures)} scenario(s)",
+            f"worse than the base by more than the tolerance on "
+            f"{len(failures)} scenario(s)",
             parts + [""] + [f"  FAIL {line}" for line in failures],
+        )
+    if not improved and not regressed:
+        # A gate that passes because nothing resolved anything is not a pass. The
+        # distinction matters: "no regression found" and "no measurement" are
+        # different sentences, and conflating them is how a run with too few
+        # repeats reports a clean bill of health.
+        return Gate(
+            True,
+            "no scenario resolved a difference, so nothing was gated",
+            parts
+            + [
+                "",
+                "  The run could not separate the two builds on any scenario. That "
+                "is a measurement that was too small, not a finding of equality.",
+            ],
         )
     return Gate(True, "within the requested tolerance", parts)
 
@@ -1018,16 +1053,18 @@ def render_charts(result: Result, agg: dict, cover: dict, outdir: Path) -> list[
     labels = [cover["cores"].get(c, c) for c in core_ids]
     written: list[Path] = []
 
-    # -- 1. implemented surface, all four cores ----------------------------
-    if core_ids:
+    # -- 1. implemented surface, all four projects --------------------------
+    chart_ids = [c for c in core_ids if c in caps.project_cores()]
+    chart_labels = [cover["cores"].get(c, c) for c in chart_ids]
+    if chart_ids:
         rows = list(caps.FEATURES)
         fig, ax = plt.subplots(figsize=(7.0, 0.235 * len(rows) + 2.0))
         _draw_grid(
             plt, ax,
             rows,
             [f"{r.area}: {r.feature}" for r in rows],
-            core_ids,
-            labels,
+            chart_ids,
+            chart_labels,
             lambda r, c: caps.scale_value(caps.feature_value(r, c)),
             title="Implemented surface per project (1.00 yes, 0.00 no)",
             note=(
@@ -1044,11 +1081,11 @@ def render_charts(result: Result, agg: dict, cover: dict, outdir: Path) -> list[
     # -- 2. protocol x transport, one panel per core -----------------------
     protocols = list(caps.PROTOCOLS)
     transports = list(caps.TRANSPORTS)
-    if core_ids:
+    if chart_ids:
         fig, axes = plt.subplots(
-            1, len(core_ids), figsize=(4.2 * len(core_ids), 5.2), squeeze=False
+            1, len(chart_ids), figsize=(4.2 * len(chart_ids), 5.2), squeeze=False
         )
-        for index, core_id in enumerate(core_ids):
+        for index, core_id in enumerate(chart_ids):
             core = caps.get(core_id)
             ax = axes[0][index]
 

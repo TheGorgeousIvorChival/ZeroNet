@@ -112,6 +112,12 @@ class Core:
     language: str
     dialect: str
     """`xray` if this core reads Xray JSON verbatim, `singbox` otherwise."""
+    cli: str
+    """Which command line this core speaks. Not the same thing as the dialect:
+    Xray-core and xray-rust both read Xray JSON and are invoked differently
+    (`run -c` against `run -config`). Every core has to name one, because
+    dispatching on the id means a new core fails at run time with "no run
+    command known" instead of at start-up."""
     client_protocols: frozenset[str]
     server_protocols: frozenset[str]
     transports: frozenset[str]
@@ -162,6 +168,7 @@ ZRAY = Core(
     label="Zray (ZeroNet)",
     language="Rust",
     dialect="xray",
+    cli="zray",
     client_protocols=frozenset(
         {
             "vless",
@@ -232,6 +239,7 @@ XRAY = Core(
     label="Xray-core",
     language="Go",
     dialect="xray",
+    cli="xray",
     client_protocols=frozenset(
         {"vless", "vmess", "trojan", "shadowsocks", "shadowsocks2022", "freedom"}
     ),
@@ -280,6 +288,7 @@ SINGBOX = Core(
     label="sing-box",
     language="Go",
     dialect="singbox",
+    cli="singbox",
     client_protocols=frozenset(
         {
             "vless",
@@ -347,6 +356,7 @@ XRAY_RUST = Core(
     label="xray-rust",
     language="Rust",
     dialect="xray",
+    cli="xray-rust",
     client_protocols=frozenset({"vless", "hysteria2"}),
     # Its inbounds are socks, http and tun. There is no server mode, so it can
     # only ever be the client in this harness.
@@ -403,6 +413,9 @@ ZRAY_BASE = Core(
     label="Zray (base commit)",
     language="Rust",
     dialect="xray",
+    # The same command line as the candidate: the two binaries have to differ in
+    # exactly one thing, and that thing is the commit.
+    cli=ZRAY.cli,
     client_protocols=ZRAY.client_protocols,
     server_protocols=ZRAY.server_protocols,
     transports=ZRAY.transports,
@@ -425,6 +438,11 @@ ZRAY_BASE = Core(
         ),
     },
 )
+
+#: The command lines the harness knows how to drive. A `Core` outside this set
+#: cannot be started or validated, and the self-test fails on that rather than a
+#: run failing fifty cells later.
+KNOWN_CLIS = ("zray", "xray", "xray-rust", "singbox")
 
 ALL_CORES = {c.id: c for c in (ZRAY, XRAY, SINGBOX, XRAY_RUST, ZRAY_BASE)}
 DEFAULT_CORES = ["zray", "xray", "singbox", "xray-rust"]
@@ -579,6 +597,17 @@ def scale_value(text: str) -> float:
         if head == name:
             return value
     return 0.0
+
+
+def project_cores() -> list[str]:
+    """The four separate projects.
+
+    `zray-base` is excluded: it is a build of this project from another commit,
+    not a project, so it has no capability of its own to tabulate. Its support
+    for a connection type is the candidate's, and the run's own coverage table
+    shows that.
+    """
+    return [c for c in DEFAULT_CORES if c in ALL_CORES]
 
 
 def feature_areas() -> list[str]:

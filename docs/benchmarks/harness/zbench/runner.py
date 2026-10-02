@@ -236,6 +236,16 @@ class Runner:
                     )
         if candidate_revision:
             self.result.candidate_revision = candidate_revision
+            candidate = self.binaries.get("zray")
+            if candidate is not None and candidate.source_revision and (
+                not candidate.source_revision.startswith(candidate_revision[:12])
+            ):
+                self.result.notes.append(
+                    f"the candidate binary reports commit "
+                    f"{candidate.source_revision} but the checkout is at "
+                    f"{candidate_revision}; the numbers are from the binary and the "
+                    f"revision names the checkout"
+                )
         if not self.identity.mldsa_seed:
             self.result.notes.append(
                 "OpenSSL 3.5 or newer was not available, so the ML-DSA-65 REALITY "
