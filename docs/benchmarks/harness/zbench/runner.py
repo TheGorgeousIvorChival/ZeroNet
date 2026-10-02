@@ -423,9 +423,7 @@ class Runner:
         self._ceilings[streams] = value
         if value:
             self.result.harness_ceilings[str(streams)] = round(value, 3)
-            # The summary is the ceiling at the most streams any scenario uses,
-            # because that is the number a reader compares a headline against.
-            # It is a summary, not the value rows are gated on: each row uses the
+            # A summary, not the value any row is judged on: each row uses the
             # ceiling measured at its own stream count.
             if self.result.harness_ceiling_mbps is None:
                 self.result.harness_ceiling_mbps = value
@@ -695,13 +693,8 @@ class Runner:
                 return cell
             if output.get("errors"):
                 errors = [str(e) for e in output["errors"]]
-                # A read that trips the socket deadline surfaces as EAGAIN, which
-                # on Linux is error 11 and reads like "resource temporarily
-                # unavailable" -- a resource problem, not what happened. The core
-                # stopped sending for longer than the transfer's own deadline, so
-                # that is a timeout, and saying so is what tells a reader the
-                # core stalled rather than ran out of memory or refused a
-                # connection.
+                # EAGAIN on a timed socket is the deadline expiring, not a
+                # shortage: a stalled core reads differently from a refused one.
                 stalled = all("temporarily unavailable" in e for e in errors)
                 cell.status = STATUS_TIMEOUT if stalled else STATUS_ERROR
                 cell.reason = (
@@ -989,12 +982,9 @@ class Runner:
                 ceiling = self.ceiling_for(USER_CONFIG_STREAMS)
             else:
                 cell.workload = "tunnel"
-                # No destination was named, so bytes are not moved. The endpoint
-                # this config names is its own proxy server, which does not speak
-                # the harness's framed protocol, and pointing a transfer at it
-                # fails every time regardless of the core. What can be measured
-                # for any config is whether the tunnel comes up and how long the
-                # whole path takes, and that is what is measured.
+                # With no destination named, the tunnel itself is what gets
+                # measured: the only endpoint a config names is its own proxy
+                # server, which does not speak the harness's protocol.
                 target = f"{config.target_host}:{config.target_port}"
                 args = [
                     "--target", target,
@@ -1026,13 +1016,8 @@ class Runner:
                 return cell
             if output.get("errors"):
                 errors = [str(e) for e in output["errors"]]
-                # A read that trips the socket deadline surfaces as EAGAIN, which
-                # on Linux is error 11 and reads like "resource temporarily
-                # unavailable" -- a resource problem, not what happened. The core
-                # stopped sending for longer than the transfer's own deadline, so
-                # that is a timeout, and saying so is what tells a reader the
-                # core stalled rather than ran out of memory or refused a
-                # connection.
+                # EAGAIN on a timed socket is the deadline expiring, not a
+                # shortage: a stalled core reads differently from a refused one.
                 stalled = all("temporarily unavailable" in e for e in errors)
                 cell.status = STATUS_TIMEOUT if stalled else STATUS_ERROR
                 cell.reason = (

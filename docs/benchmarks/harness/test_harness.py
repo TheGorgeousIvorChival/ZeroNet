@@ -255,20 +255,18 @@ def _configs() -> None:
             # fail at run time, in CI, on someone else's machine.
             blob = json.dumps(client)
             assert '"port": 1234' in blob, f"{link}: client does not point at the server port"
-            assert configs.is_supported_shape("xray", link), link
-
-            if not configs.is_supported_shape("singbox", link):
-                # A shape the dialect cannot express must be refused, not faked.
-                refused = False
-                for build in (
-                    lambda: configs.singbox_server(link, identity, 1234, 4321),
-                    lambda: configs.singbox_client(link, identity, 5678, 1234, 4321),
-                ):
-                    try:
-                        build()
-                    except configs.UnsupportedShape:
-                        refused = True
-                assert refused, f"{link}: sing-box dialect produced a config it cannot express"
+            # A shape the dialect cannot express must be refused, not faked --
+            # asked of the generator, which is what the run actually uses.
+            refused = False
+            for build in (
+                lambda: configs.singbox_server(link, identity, 1234, 4321),
+                lambda: configs.singbox_client(link, identity, 5678, 1234, 4321),
+            ):
+                try:
+                    build()
+                except configs.UnsupportedShape:
+                    refused = True
+            if refused:
                 continue
             sing_server = configs.singbox_server(link, identity, 1234, 4321)
             sing_client = configs.singbox_client(link, identity, 5678, 1234, 4321)
@@ -317,9 +315,13 @@ def _spelling() -> None:
     assert not configs.singbox_tls_capable("shadowsocks2022")
     assert configs.singbox_tls_capable("vless")
     link = configs.Link("shadowsocks", "raw", "tls")
-    assert not configs.is_supported_shape("singbox", link)
     with tempfile.TemporaryDirectory() as raw:
         identity = configs.generate_identity(pathlib.Path(raw))
+        try:
+            configs.singbox_client(link, identity, 5678, 1234, 4321)
+            raise AssertionError("sing-box has no TLS block on Shadowsocks")
+        except configs.UnsupportedShape:
+            pass
         try:
             configs.singbox_client(link, identity, 1, 2, 3)
         except configs.UnsupportedShape:
@@ -748,7 +750,7 @@ def _bench_args_script() -> None:
     flags = {"--suite", "--server-core", "--runs", "--bytes", "--iterations",
              "--cores", "--only", "--exclude", "--user-config-url",
              "--user-config-dir", "--base-ref", "--gate-regression",
-             "--user-target"}
+             "--user-target", "--repo"}
     for index, item in enumerate(lines):
         if item in flags:
             assert index + 1 < len(lines), f"{item} has no value"
@@ -766,6 +768,12 @@ def _bench_args_script() -> None:
     # An explicit core list still wins over the default.
     lines, _ = assemble(BENCH_CORES="zray-base,zray", BENCH_BASE_REF="x")
     assert lines[lines.index("--cores") + 1] == "zray-base,zray", lines
+
+    # A combined baseline needs to know which repository's pull requests to merge.
+    lines, _ = assemble(BENCH_REPO="zeghostwriter/ZeroNet")
+    assert lines[lines.index("--repo") + 1] == "zeghostwriter/ZeroNet", lines
+    lines, _ = assemble()
+    assert "--repo" not in lines, "no repository asked for means no flag"
 
     # A supplied config's destination reaches the harness by name.
     lines, _ = assemble(BENCH_USER_TARGET="example.org:9000")
@@ -960,6 +968,142 @@ def _superset() -> None:
             f"{metric} is printed as a bare number, so its unit never appears: "
             f"{rendered!r} for unit {unit!r}"
         )
+
+
+@check("the xray-rust comparison is accurate, in both directions")
+def _xray_rust_suite() -> None:
+    """A comparison that cannot be checked is a claim, not a measurement.
+
+    Every `covered` row has to name something the matrix really builds, and the
+    protocols this harness says it does not touch have to be exactly the ones
+    xray-rust can be given a config for and this one cannot serve -- otherwise
+    the gap list is either hiding a scenario that works or inventing one that
+    does not.
+    """
+    from zbench import matrix as M, caps as C, xrayrust_suite as X
+
+    statuses = {row["status"] for row in X.XRAY_RUST_SUITE}
+    assert statuses <= {"covered", "partial", "capability", "not_covered"}, statuses
+    assert "covered" in statuses and "not_covered" in statuses, (
+        "a comparison in which nothing is missing would be a claim of superset; "
+        "it is not one, and the rows should say so"
+    )
+
+    # What the matrix builds, as (protocol, transport, security).
+    built = {(s.link.protocol, s.link.transport, s.link.security)
+             for s in M.select("full")}
+    for protocol, transport, security in built:
+        if protocol in ("vless", "vmess") and transport in (
+            "raw", "ws", "httpupgrade", "grpc", "xhttp-h1", "xhttp-h2", "xhttp-h3"
+        ):
+            continue
+        # Anything outside that shape must be deliberate, so a new protocol cannot
+        # be added without deciding whether its transport is covered.
+        assert protocol in {"trojan", "shadowsocks", "shadowsocks2022", "anytls"}, (
+            f"{protocol}/{transport} is in the matrix but not in the known shape"
+        )
+
+    # Every protocol xray-rust can be given a config for, and this harness does
+    # not drive, must appear in the gap list -- with the reason it is a gap.
+    xray_rust_only = C.XRAY_RUST.client_protocols - {p for p, _t, _s in built}
+    items = " ".join(row["item"].lower() for row in X.XRAY_RUST_SUITE)
+    for protocol in xray_rust_only:
+        assert protocol in items, (
+            f"{protocol} is in xray-rust's capability set, is not driven by any "
+            f"scenario, and is not listed as a gap"
+        )
+        row = next(r for r in X.XRAY_RUST_SUITE if r["item"].lower().startswith(protocol))
+        assert row["status"] == "not_covered", row
+        assert len(row["ours"]) > 40, f"{protocol} is listed without a reason"
+
+    # And the reverse: a `covered` row must be one this harness really builds, so
+    # it cannot claim coverage of a scenario nobody runs.
+    # A `covered` row names the (protocol, transport) pairs it claims, and every
+    # one has to be a pair the matrix actually builds. This is what makes
+    # "covered" mean something: claim a transport with no scenario behind it and
+    # this fails, so the table cannot drift away from the matrix.
+    built_pairs = {(s.link.protocol, s.link.transport) for s in M.select("full")}
+    claimed = 0
+    for row in X.XRAY_RUST_SUITE:
+        if "builds" not in row:
+            continue
+        for pair in row["builds"]:
+            claimed += 1
+            assert pair in built_pairs, (
+                f"{row['item']!r} claims {pair} is covered, but no scenario uses "
+                f"that protocol and transport"
+            )
+        if row["status"] == "not_covered" and row["builds"]:
+            raise AssertionError(f"{row['item']!r} says not covered but claims pairs")
+    assert claimed >= 8, f"only {claimed} claimed pairs; the table asserts almost nothing"
+
+    # Every transport the full matrix builds should be accounted for by a row,
+    # so a scenario added later cannot be silently uncompared.
+    unaccounted = built_pairs - {
+        pair for row in X.XRAY_RUST_SUITE for pair in row.get("builds", ())
+    }
+    documented = {
+        ("vless", "raw"), ("vless", "ws"), ("vless", "httpupgrade"),
+        ("vless", "grpc"), ("vless", "xhttp-h1"), ("vless", "xhttp-h2"),
+        ("vless", "xhttp-h3"), ("vmess", "raw"), ("vmess", "ws"),
+        ("trojan", "raw"), ("trojan", "ws"), ("trojan", "grpc"),
+        ("shadowsocks", "raw"), ("shadowsocks2022", "raw"), ("anytls", "raw"),
+    }
+    new_pairs = unaccounted - documented
+    assert not new_pairs, (
+        f"these protocol/transport pairs are in the matrix but no comparison row "
+        f"mentions them: {sorted(new_pairs)}"
+    )
+
+
+@check("the combined baseline names what it was built from")
+def _pr_base() -> None:
+    """A baseline made of many branches has to say which ones.
+
+    Merging ten pull requests and reporting one number against it is only
+    meaningful if the report says what went in. These checks need no network:
+    they read the sentinel handling and the shape of the record, so a change that
+    drops the description is caught here rather than in a run somebody waited on.
+    """
+    from zbench import prbase
+
+    assert prbase.MERGED.startswith("@") and prbase.PLAIN.startswith("@")
+
+    # A plain sentinel is passed through untouched, with a description.
+    value, notes = prbase.resolve_base_ref(".", prbase.PLAIN, repo="x/y")
+    assert value == prbase.PLAIN, value
+    assert notes and any("default branch" in n for n in notes), notes
+
+    # An ordinary git ref is left for the builder and still described.
+    value, notes = prbase.resolve_base_ref(".", "v0.2.0", repo="x/y")
+    assert value == "v0.2.0", value
+    assert notes and any("v0.2.0" in n for n in notes), notes
+
+    # A repository with nothing open is a question with no answer, not a baseline
+    # of the empty merge.
+    original = prbase.list_pull_requests
+    try:
+        prbase.list_pull_requests = lambda repo, **kw: []
+        try:
+            prbase.merged_prs_ref(".", "x/y")
+            raise AssertionError("an empty merge was accepted as a baseline")
+        except SystemExit as exc:
+            assert "no open pull requests" in str(exc), exc
+        # A merge that conflicts must stop the run and name the pull request.
+        prbase.list_pull_requests = lambda repo, **kw: [
+            prbase.PullRequest(7, "t", "head", "main", "u", "MERGEABLE")
+        ]
+        prbase._gh = lambda *a: "[]"
+        prbase.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(
+            SystemExit("merging #7 head for the benchmark baseline failed")
+        )
+        try:
+            prbase.merged_prs_ref(".", "x/y")
+            raise AssertionError("a conflicting merge was accepted as a baseline")
+        except SystemExit as exc:
+            assert "#7" in str(exc), exc
+    finally:
+        prbase.list_pull_requests = original
 
 
 @check("the chart scale is monotonic and total")

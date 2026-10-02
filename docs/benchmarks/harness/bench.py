@@ -32,10 +32,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from zbench import caps, cores, matrix, report, runner, support_doc, userconfig  # noqa: E402
+from zbench import caps, cores, matrix, prbase, report, runner, support_doc, userconfig  # noqa: E402
 
 # harness/ -> benchmarks/ -> docs/ -> the repository root.
 ROOT = HERE.parents[2]
+
+#: Where the pull-request list is read from when the caller does not say. The
+#: harness lives in this repository, so that is the repository whose pull
+#: requests a combined baseline is made of.
+DEFAULT_REPO = "TheGorgeousIvorChival/ZeroNet"
 
 
 def byte_size(text: str) -> int:
@@ -86,6 +91,23 @@ def build_parser() -> argparse.ArgumentParser:
             "comma-separated cores to compare. The first is the baseline every other "
             "core is compared against. The default is the four projects, or those "
             f"plus {caps.BASE_ID} first when --base-ref is given"
+        ),
+    )
+    parser.add_argument(
+        "--list-prs",
+        action="store_true",
+        help=(
+            "print the open pull requests --base-ref would merge, and exit. Use it "
+            "to see what a combined baseline is made of before measuring against it"
+        ),
+    )
+    parser.add_argument(
+        "--repo",
+        default=DEFAULT_REPO,
+        metavar="OWNER/NAME",
+        help=(
+            f"the repository --list-prs and --base-ref {prbase.MERGED} work "
+            f"against. Defaults to the project this harness lives in"
         ),
     )
     parser.add_argument(
@@ -278,6 +300,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.emit_support_doc:
         return _support_doc(args)
 
+    if args.list_prs:
+        pulls = prbase.list_pull_requests(args.repo)
+        if not pulls:
+            print(f"{args.repo} has no open pull requests")
+            return 0
+        width = max(len(p.short) for p in pulls)
+        for pull in pulls:
+            mergeable = "" if pull.mergeable == "MERGEABLE" else f"  ({pull.mergeable})"
+            print(f"{pull.short:<{width}}  {pull.base:<8}  {pull.title}{mergeable}")
+        print(f"\n{len(pulls)} open pull request(s) on {args.repo}")
+        print(f"--base-ref {prbase.MERGED} builds all of them into one state to measure against")
+        return 0
+
     if args.cores:
         core_ids = [c.strip() for c in args.cores.split(",") if c.strip()]
     elif args.base_ref:
@@ -308,6 +343,14 @@ def main(argv: list[str] | None = None) -> int:
     outdir.mkdir(parents=True, exist_ok=True)
     workdir.mkdir(parents=True, exist_ok=True)
     cores.cleanup_at_exit()
+
+    base_notes: list[str] = []
+    if args.base_ref and args.base_ref.startswith("@"):
+        runner.log(f"resolving --base-ref {args.base_ref} against {args.repo}")
+        resolved, base_notes = prbase.resolve_base_ref(ROOT, args.base_ref, repo=args.repo)
+        args.base_ref = resolved
+        for note in base_notes:
+            runner.log(f"  base: {note}")
 
     runner.log(f"resolving cores: {', '.join(core_ids)}")
     given = {
@@ -375,6 +418,10 @@ def main(argv: list[str] | None = None) -> int:
         base_ref=args.base_ref or "",
         candidate_revision=_revision(ROOT),
     )
+    for note in base_notes:
+        # A number is not evidence without the state it was measured against, so
+        # what `--base-ref` resolved to goes into the report and the artefact.
+        engine.result.notes.append(f"the base is {note}")
     engine.start_sink()
 
     result_invocation = list(sys.argv[1:])

@@ -463,10 +463,8 @@ def _xray_transport(
             reality["publicKey"] = identity.reality_public
             reality["shortId"] = identity.reality_short_id
             if link.mldsa:
-                # Dropping this field would leave a scenario named
-                # `...-mldsa65-...` measuring a plain REALITY handshake, which is
-                # the report asserting a measurement it did not take. If the key
-                # is not there, the row cannot be built as named.
+                # A row named `...-mldsa65-...` must not carry a plain REALITY
+                # handshake, so it is refused rather than generated without it.
                 if not identity.mldsa_verify:
                     raise UnsupportedShape(
                         "this scenario is ML-DSA-65 REALITY and the fixture has no "
@@ -922,23 +920,3 @@ def write_config(path: Path, config: dict) -> Path:
     # the run directory.
     path.write_text(json.dumps(config, indent=2) + "\n")
     return path
-
-
-def is_supported_shape(dialect: str, link: Link) -> bool:
-    """Whether a config can even be written for this dialect.
-
-    A false here means the *harness* cannot express the scenario, which is a
-    different thing from a core not supporting it, and the report says so
-    rather than inventing an approximation.
-    """
-    if dialect == "xray":
-        # The Xray dialect is the superset: every transport named here is an
-        # Xray transport, and the protocols that extend it are Zray's own.
-        return True
-    if dialect == "singbox":
-        if link.security in ("tls", "reality") and not singbox_tls_capable(
-            link.protocol
-        ):
-            return False
-        return link.quic_based or link.transport in ("raw", "ws", "httpupgrade", "grpc")
-    return False

@@ -18,8 +18,8 @@ log attached.
 
 Nothing here rewrites a user's config. Adding a SOCKS inbound would change what
 is being measured, so a config without a local proxy listener is reported as not
-runnable with the reason, and `--user-inject-inbound` is available for a caller
-who has decided that trade is worth making on purpose.
+runnable, with the reason. A caller who wants that trade made on purpose edits
+the file; the harness will then measure the file as it stands.
 """
 
 from __future__ import annotations

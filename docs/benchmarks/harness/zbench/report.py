@@ -248,10 +248,7 @@ def aggregate(result: Result) -> dict:
                     # comparing the two has to have it in front of them.
                     "MBps": "MB/s",
                 }.get(metric, unit)
-                # A thread count is summarised like everything else. It was
-                # stored as a bare integer, which is not the shape the tables
-                # read, so the "Peak threads" section was silently dropped from
-                # every report that had one.
+                # Summarised like every other metric, so the tables can read it.
                 record[name] = stats.summarise(values, unit_name).as_dict()
             entry["cores"][core] = record
 
@@ -902,11 +899,8 @@ def gate(
             ["no scenario produced a candidate/base pair, so nothing could be gated"],
         )
 
-    # The tolerance arrives as a percentage, because that is what the flag and
-    # the workflow input both say ("5 means 5%"). It was being used as a fraction
-    # against a ratio that runs from 0 to 1, so `1.0 - 5` is -4.0 and
-    # `interval_high < -4.0` is never true: the gate could not fail on anything,
-    # at any tolerance, while reporting that it had run.
+    # The tolerance arrives as a percentage ("5 means 5%") against a ratio that
+    # runs from 0 to 1, so it is scaled here rather than at the call sites.
     if max_regression is not None:
         max_regression = max_regression / 100.0
     if min_improvement is not None:

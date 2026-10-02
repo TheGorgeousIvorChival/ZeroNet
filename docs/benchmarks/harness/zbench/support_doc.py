@@ -88,6 +88,54 @@ def _feature_table(core_ids: list[str], labels: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def _cell(text: str) -> str:
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def _xray_rust_section() -> str:
+    from . import xrayrust_suite as X
+
+    out = ["## Compared with the xray-rust benchmark suite", ""]
+    out.append(
+        "ZeroNet and xray-rust are compared here, and xray-rust ships its own "
+        "suite. This section is generated from "
+        "`zbench/xrayrust_suite.py` so the claims are checked against the "
+        "capability model rather than re-read by hand."
+    )
+    out.append("")
+    out.append("| What they measure | Their suite | Ours | Where we stand |")
+    out.append("|---|---|---|---|")
+    for row in X.XRAY_RUST_SUITE:
+        ours = row["ours"] if row["status"] != "covered" else "measured"
+        out.append(
+            f"| {_cell(row['item'])} | {row['suite']} | {_cell(ours)} | "
+            f"**{row['status']}** |"
+        )
+    out.append("")
+    out.append(
+        f"So this is a superset in {len(X.XRAY_RUST_SUITE) - len(X.not_covered_items())} "
+        f"of {len(X.XRAY_RUST_SUITE)} areas and **not** a superset overall: "
+        + ", ".join(X.not_covered_items())
+        + " are theirs and not ours. The reason in each case is in the table."
+    )
+    out.append("")
+    out.append("### What this harness measures that theirs does not")
+    out.append("")
+    out.append("| Here | There |")
+    out.append("|---|---|")
+    for row in X.SUPERSETS:
+        out.append(f"| {_cell(row['item'])} | {_cell(row['theirs'])} |")
+    out.append("")
+    out.append("### Their published claims, and what we make of them")
+    out.append("")
+    out.append("| Their claim | Ours |")
+    out.append("|---|---|")
+    for row in X.THEIR_CLAIMS:
+        out.append(f"| {_cell(row['claim'])} | {_cell(row['ours'])} |")
+    out.append("")
+    return "\n".join(out)
+
+
 def render(core_ids: list[str] | None = None) -> str:
     core_ids = core_ids or caps.DEFAULT_CORES
     labels = {c: caps.get(c).label for c in core_ids}
@@ -139,6 +187,8 @@ def render(core_ids: list[str] | None = None) -> str:
                 continue
             out.append(f"- **{key2}**: {value}")
         out.append("")
+
+    out.append(_xray_rust_section())
 
     out.append("## Regenerating\n")
     out.append("```sh")

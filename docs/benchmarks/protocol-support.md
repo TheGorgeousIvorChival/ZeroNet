@@ -500,6 +500,49 @@ Known limitations recorded for this core:
 - **tls_trust**: A sing-box client cannot be given a private CA, so the generated client uses `insecure: true` against a loopback-only certificate. Zray and Xray-core verify the chain instead, so the TLS rows compare everything except certificate verification.
 - **multiplex**: `multiplex.brutal` has no equivalent in the other cores here.
 
+## Compared with the xray-rust benchmark suite
+
+ZeroNet and xray-rust are compared here, and xray-rust ships its own suite. This section is generated from `zbench/xrayrust_suite.py` so the claims are checked against the capability model rather than re-read by hand.
+
+| What they measure | Their suite | Ours | Where we stand |
+|---|---|---|---|
+| VLESS over raw TCP, TLS, REALITY, Vision | both | measured | **covered** |
+| WebSocket, HTTPUpgrade, gRPC, XHTTP h1/h2/h3 | both | measured | **covered** |
+| Payload validated against a deterministic byte pattern | both | measured | **covered** |
+| Peak RSS and CPU per payload, from outside the process | both | measured | **covered** |
+| Paired bootstrap ratio intervals | parity | measured | **covered** |
+| Multiple uTLS fingerprints (7 fingerprints x 7 traffic kinds) | cross-engine | one fingerprint, chrome, on the REALITY rows only | **partial** |
+| Hysteria2 as a client protocol | parity | xray-rust supports it and the capability table says so, but neither core can serve it, so there is no server for a transfer to reach. A row would measure a connection that cannot be completed | **not_covered** |
+| WireGuard as a client protocol | parity | xray-rust's is a userspace stack whose peer must be a real WireGuard endpoint, so the same applies: nothing here can be its peer | **not_covered** |
+| TUN inbound workloads (about ten of their twenty-two) | cross-engine | every scenario here drives a socks inbound; TUN needs a tun device | **not_covered** |
+| DNS and FakeDNS policy workloads | cross-engine | no DNS fixture; the traffic here is proxied TCP and UDP | **not_covered** |
+| Geodata routing latency | cross-engine | no geodata rules in any generated config | **not_covered** |
+| A shaped WAN: bounded delay, bandwidth and loss | parity | loopback only. Their relay adds 25 ms per direction at 100 Mbit/s; nothing here shapes the path, so nothing here measures loss or RTT | **partial** |
+| Absolute budgets in nanoseconds for route and selector work | cross-engine | process-level sampling cannot see inside the router's own work | **not_covered** |
+
+So this is a superset in 7 of 13 areas and **not** a superset overall: Hysteria2 as a client protocol, WireGuard as a client protocol, TUN inbound workloads (about ten of their twenty-two), DNS and FakeDNS policy workloads, Geodata routing latency, Absolute budgets in nanoseconds for route and selector work are theirs and not ours. The reason in each case is in the table.
+
+### What this harness measures that theirs does not
+
+| Here | There |
+|---|---|
+| A measured generator ceiling, per flow count | the parity report has no absolute ceiling at all; only relative ratios, and its README explicitly disclaims a shared budget |
+| The baseline measured against itself | no noise floor is published beside each ratio |
+| A gate against the change's own base, on every pull request | their CI runs no benchmark; ci.yml only self-tests the checkers |
+| Four cores in one run, including this project's own | xray-rust, Xray-core, sing-box, plus native Hysteria and WG |
+| A capability surface: what each core cannot be configured to do | found by each config being rejected, but never tabulated as a surface of what is missing |
+| A coverage grid drawn per link, with missing cells hatched | not present |
+| Benchmarking a configuration supplied from outside the repo | not present |
+| A validator that re-derives every aggregate from the raw cells | check-benchmark-publication.py exists and is fail-closed, but the parity summariser reuses its own statistics helpers |
+
+### Their published claims, and what we make of them
+
+| Their claim | Ours |
+|---|---|
+| v0.7's published verdict is 'Not established across all measured cases', with 33 of 195 retained point differences outside a 3% allowance | consistent with what we measure: 34 of 35 comparisons on our own runs resolve to within noise at 3 repeats |
+| the README scope table lists WireGuard and Hysteria2 as unsupported, while v0.7 implements both | we report the capability from the binary's own config checker, not from its README, which is why this harness found Hysteria2 supported where the README says no |
+| heap allocation counts are explicitly out of scope for both | agreed: process-level sampling cannot compare Go and Rust allocation |
+
 ## Regenerating
 
 ```sh

@@ -37,7 +37,16 @@ on:
         description: >-
           Git ref to build a second Zray from, as the `zray-base` baseline. A
           pull request run sets this to the merge base on its own; set it by hand
-          to compare two commits at any time, e.g. v0.2.0
+          to compare two commits at any time, e.g. v0.2.0. Two sentinels also
+          work: `@main` for the default branch with no pull requests applied, and
+          `@merged-prs` for every open pull request in `repo` merged into one
+          commit, which is the state the branch will actually land on.
+        type: string
+        default: ""
+      repo:
+        description: >-
+          Repository `--list-prs` and `@merged-prs` work against. Defaults to the
+          project this harness lives in.
         type: string
         default: ""
       gate_regression:
@@ -501,6 +510,7 @@ jobs:
           export BENCH_URLS="${{ inputs.user_config_urls }}"
           export BENCH_USER_TARGET="${{ inputs.user_target }}"
           export BENCH_BASE_REF="${{ inputs.base_ref }}"
+          export BENCH_REPO="${{ inputs.repo }}"
           export BENCH_GATE="${{ inputs.gate_regression }}"
           [[ -d "$RUNNER_TEMP/user-configs" ]] && export BENCH_USER_DIR="$RUNNER_TEMP/user-configs"
           bash .github/scripts/bench-args.sh | tee "$RUNNER_TEMP/command"

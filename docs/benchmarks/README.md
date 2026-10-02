@@ -92,6 +92,36 @@ rather than an obvious one. The base's commit and the candidate's are both
 recorded in the report, and a base binary whose commit disagrees with the ref it
 was given is called out in the notes rather than quietly relabelled.
 
+#### Against the state the branch will actually land on
+
+With several pull requests open, the number that matters is not "this branch
+against `main`" but "this branch against `main` with the other pull requests
+applied". Two sentinels do that:
+
+```sh
+# what is open, and what a combined baseline would be made of
+python3 bench.py --list-prs --repo zeghostwriter/ZeroNet
+
+# every open pull request merged into one commit, built as the base
+python3 bench.py --base-ref @merged-prs --repo zeghostwriter/ZeroNet --gate-regression 5
+
+# the other end of the comparison: main with none of them applied
+python3 bench.py --base-ref @main --repo zeghostwriter/ZeroNet
+```
+
+`@merged-prs` fetches each pull request by number, merges every head into the
+base in turn, and hands the resulting commit to the builder -- the same builder
+`--base-ref v0.2.0` uses, so it is a thing that gets compiled rather than a ref
+that gets trusted. The merge is real: a conflict stops the run and names the pull
+request that caused it, rather than producing a baseline that is half of each
+thing. What the baseline is made of is written into the report, because a ratio
+without the state it was measured against is not evidence.
+
+The two ends answer different questions and both are worth having. `@main` says
+what this change did. `@merged-prs` says what this change did once everything
+else lands with it, which is the only one of the two that matches what a user
+will actually run.
+
 ### Supplying your own configurations
 
 `workflow_dispatch` takes a `user_configs` textarea and a `user_config_urls`
