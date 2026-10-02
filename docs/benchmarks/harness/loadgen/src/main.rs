@@ -36,6 +36,7 @@
 //! | `latency` | small validated round trips | `--iterations`, `--payload`, `--warmup` |
 //! | `udp-down` | UDP through SOCKS5 UDP ASSOCIATE | `--iterations`, `--payload`, `--warmup` |
 //! | `udp-latency` | UDP echo round trips | same options as `udp-down` |
+//! | `probe` | establish the tunnel, send nothing | `--iterations`, `--warmup` |
 //!
 //! Every mode prints one JSON object on stdout and exits 1 when it carries a
 //! non-empty `error` or `errors` list, so the harness can trust the exit status
@@ -1427,6 +1428,87 @@ fn cmd_udp(proxy: Proxy, target: SocketAddr) -> J {
 }
 
 // ---------------------------------------------------------------------------
+// Probe
+// ---------------------------------------------------------------------------
+
+/// Establish the tunnel and close it. No payload is exchanged.
+///
+/// This exists because a throughput run needs a destination that speaks the
+/// harness's own framed keystream, and the only endpoint a supplied
+/// configuration reliably names is its own proxy server -- which speaks the
+/// proxy protocol, not this one. Pointing a `down` run at that port fails by
+/// construction, so the only honest measurements available for an arbitrary
+/// config are the ones that stop once the tunnel is up: whether it comes up at
+/// all, and how long the whole path takes.
+fn cmd_probe(proxy: Proxy, target: SocketAddr) -> J {
+    let iterations = opt_count("--iterations").unwrap_or(200);
+    let warmup = opt_count("--warmup").unwrap_or(10);
+    let mut rtt = Samples::default();
+    let mut connect_total = Samples::default();
+    let mut phases: BTreeMap<&str, Samples> = BTreeMap::new();
+    let mut errors: Vec<String> = Vec::new();
+    let started = Instant::now();
+    let mut measured_at: Option<Instant> = None;
+
+    for i in 0..(iterations + warmup) {
+        let t0 = Instant::now();
+        match proxy.connect(target) {
+            Ok((sock, timing)) => {
+                drop(sock);
+                if i >= warmup {
+                    let _ = measured_at.get_or_insert_with(Instant::now);
+                    rtt.push(t0.elapsed().as_secs_f64() * 1e6);
+                    connect_total.push(timing.total.as_secs_f64() * 1e6);
+                    phases.entry("tcp_connect").or_default()
+                        .push(timing.tcp_connect.as_secs_f64() * 1e6);
+                    phases.entry("socks_greeting").or_default()
+                        .push(timing.socks_greeting.as_secs_f64() * 1e6);
+                    phases.entry("socks_connect").or_default()
+                        .push(timing.socks_connect.as_secs_f64() * 1e6);
+                }
+            }
+            Err(e) => {
+                errors.push(format!("iteration {i}: connect: {e}"));
+                break;
+            }
+        }
+    }
+
+    let succeeded = rtt.values.len() as u64;
+    J::O(vec![
+        ("schema".into(), s(SCHEMA)),
+        ("mode".into(), s("probe")),
+        ("iterations".into(), J::U(iterations)),
+        ("warmup".into(), J::U(warmup)),
+        ("succeeded".into(), J::U(succeeded)),
+        ("wall_ms".into(), J::N(started.elapsed().as_secs_f64() * 1e3)),
+        (
+            "measured_ms".into(),
+            J::N(
+                measured_at
+                    .map(|t| t.elapsed().as_secs_f64() * 1e3)
+                    .unwrap_or_else(|| started.elapsed().as_secs_f64() * 1e3),
+            ),
+        ),
+        ("tunnel_us".into(), samples_json(&rtt, "microseconds")),
+        (
+            "connect_us".into(),
+            J::O(vec![
+                ("total".into(), samples_json(&connect_total, "microseconds")),
+                (
+                    "stages".into(),
+                    J::O(phases
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), samples_json(v, "microseconds")))
+                        .collect()),
+                ),
+            ]),
+        ),
+        ("errors".into(), J::A(errors.into_iter().map(s).collect())),
+    ])
+}
+
+// ---------------------------------------------------------------------------
 // Harness ceiling
 // ---------------------------------------------------------------------------
 
@@ -1501,7 +1583,7 @@ loadgen - traffic generator and sink for the Zray benchmark harness
   loadgen run      --proxy HOST:PORT --target HOST:PORT --mode MODE [--json]
   loadgen selftest --target HOST:PORT [--bytes N] [--streams N] [--json]
 
-modes: down, up, duplex, hold, latency, udp-down, udp-latency
+modes: down, up, duplex, hold, latency, probe, udp-down, udp-latency
 ";
 
 fn main() {
@@ -1529,6 +1611,7 @@ fn main() {
                     cmd_bulk(proxy, target, &mode)
                 }
                 "latency" => cmd_latency(proxy, target),
+                "probe" => cmd_probe(proxy, target),
                 "udp-down" | "udp-latency" => cmd_udp(proxy, target),
                 other => die(format!("unknown --mode {other}\n\n{USAGE}")),
             }

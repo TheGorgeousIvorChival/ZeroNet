@@ -636,6 +636,58 @@ def _split() -> None:
         assert found["links"].kind == "link", found["links"].kind
 
 
+@check("a supplied config transfers only when a destination is named")
+def _user_target() -> None:
+    """The distinction the whole supplied-config path rests on.
+
+    A config names its own proxy server, and that endpoint speaks the proxy
+    protocol rather than this harness's, so pointing a byte transfer at it fails
+    for every core every time. Without a named destination the config must still
+    be measured -- the tunnel -- and must not claim a throughput it never got.
+    """
+    from zbench import runner as R
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = pathlib.Path(raw)
+        (directory / "c.json").write_text(json.dumps({
+            "inbounds": [{"protocol": "socks", "listen": "127.0.0.1", "port": 1080}],
+            "outbounds": [{"protocol": "vless", "settings": {"vnext": [
+                {"address": "example.com", "port": 443, "users": [{"id": "x"}]}
+            ]}}],
+        }))
+        found = {c.name: c for c in userconfig.collect(directory=directory)}["c"]
+
+        assert not found.can_transfer, "no destination named means nothing to move bytes to"
+        assert found.target_host == "example.com"
+
+        found.measure_host, found.measure_port = "10.0.0.1", 9000
+        assert found.can_transfer, "a named destination is what makes a transfer possible"
+
+        # The probe path must not claim a rate it never measured. `_fill` is
+        # shared with the matrix rows, and its operations-rate branch was gated on
+        # a list of workloads that did not include this one, so the row's headline
+        # metric was computed nowhere and every such cell read as blank.
+        engine = R.Runner.__new__(R.Runner)
+        cell = R.Cell(scenario="user:c", group="user", link="user",
+                      workload="passthrough", core="xray", repeat=0,
+                      status="skipped", streams=R.USER_CONFIG_STREAMS)
+        engine.harness_ceiling = None
+        engine._ceilings = {}
+        window = measure.Window(cpu_s=0.1, rss_peak_kb=1024.0, rss_hwm_kb=None,
+                                threads_peak=None, samples=4)
+        engine._fill(cell, {"measured_ms": 1000.0, "iterations": 200}, window)
+        assert cell.ops_per_s == 200.0, cell.ops_per_s
+        assert cell.throughput_mbps is None, (
+            "a probe exchanges no payload, so it has no throughput to report"
+        )
+
+        # And with a destination named it does report one.
+        engine._fill(cell, {"throughput_mbps": 1000.0, "MBps": 125.0,
+                            "bytes_moved": 1024, "measured_ms": 1000.0,
+                            "iterations": 4}, window)
+        assert cell.throughput_mbps == 1000.0, cell.throughput_mbps
+
+
 @check("the generated comparison document is deterministic")
 def _support_doc() -> None:
     from zbench import support_doc
@@ -691,7 +743,8 @@ def _bench_args_script() -> None:
     # flag belongs, which is the whole failure mode this replaced.
     flags = {"--suite", "--server-core", "--runs", "--bytes", "--iterations",
              "--cores", "--only", "--exclude", "--user-config-url",
-             "--user-config-dir", "--base-ref", "--gate-regression"}
+             "--user-config-dir", "--base-ref", "--gate-regression",
+             "--user-target"}
     for index, item in enumerate(lines):
         if item in flags:
             assert index + 1 < len(lines), f"{item} has no value"
@@ -709,6 +762,12 @@ def _bench_args_script() -> None:
     # An explicit core list still wins over the default.
     lines, _ = assemble(BENCH_CORES="zray-base,zray", BENCH_BASE_REF="x")
     assert lines[lines.index("--cores") + 1] == "zray-base,zray", lines
+
+    # A supplied config's destination reaches the harness by name.
+    lines, _ = assemble(BENCH_USER_TARGET="example.org:9000")
+    assert lines[lines.index("--user-target") + 1] == "example.org:9000", lines
+    lines, _ = assemble()
+    assert "--user-target" not in lines, "no target asked for means no flag"
 
     # Comma separated lists with stray whitespace do not become empty arguments.
     lines, _ = assemble(BENCH_ONLY=" vless-raw-tls , xhttp ", BENCH_EXCLUDE="")

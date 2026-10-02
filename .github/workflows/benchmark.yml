@@ -97,6 +97,15 @@ on:
         description: "https:// URLs of configurations or subscriptions to fetch and measure. Comma separated."
         type: string
         default: ""
+      user_target:
+        description: >-
+          HOST:PORT of an endpoint that answers this harness's own protocol, for
+          the supplied configurations to be measured moving bytes against. Without
+          it each config is still measured -- by whether its tunnel comes up and
+          how fast, which every config supports -- but no bytes are moved, because
+          the only endpoint a config names is its own proxy server.
+        type: string
+        default: ""
       comment:
         description: "Post the report as a pull request comment"
         type: boolean
@@ -478,6 +487,7 @@ jobs:
           export BENCH_ONLY="${{ inputs.only }}"
           export BENCH_EXCLUDE="${{ inputs.exclude }}"
           export BENCH_URLS="${{ inputs.user_config_urls }}"
+          export BENCH_USER_TARGET="${{ inputs.user_target }}"
           export BENCH_BASE_REF="${{ inputs.base_ref }}"
           export BENCH_GATE="${{ inputs.gate_regression }}"
           [[ -d "$RUNNER_TEMP/user-configs" ]] && export BENCH_USER_DIR="$RUNNER_TEMP/user-configs"

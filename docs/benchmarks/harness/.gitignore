@@ -3,3 +3,6 @@
 /results/
 __pycache__/
 *.pyc
+
+# Downloaded cores, cached between runs so a re-run does not refetch.
+/.cache/

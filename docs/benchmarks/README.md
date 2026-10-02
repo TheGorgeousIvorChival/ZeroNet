@@ -113,11 +113,30 @@ A configuration that is already JSON is measured as it stands. Two things are
 then required of it, and both are reported per row rather than assumed:
 
 * a local `socks`, `mixed` or `http` inbound, so there is a port to drive;
-* a server address in the first proxy outbound, which is the destination.
+* a server address in the first proxy outbound, which is where the tunnel goes.
 
-The load generator is pointed at that destination, so these rows include whatever
-network is in the way. They are comparable between cores only when every core
-reached the same endpoint, which the row shows.
+A supplied config is then measured one of two ways, and the row says which.
+
+**Without `user_target`, the tunnel is measured.** The only endpoint a config
+names is its own proxy server, and that endpoint speaks the proxy protocol rather
+than this harness's framed one -- so pointing a transfer at it fails for every
+core every time, whatever the core. What can be measured for any config is
+whether the tunnel comes up at all, how many it can establish per second, and
+how long the whole path takes, broken down into TCP, SOCKS greeting and SOCKS
+request. That is a real measurement of your configuration over your network.
+
+**With `user_target`, bytes are moved.** Name a `HOST:PORT` that answers this
+harness's protocol -- typically a sink you run yourself -- and the row becomes a
+throughput measurement against it:
+
+```sh
+./loadgen/target/release/loadgen sink --port 9000 &
+python3 bench.py --only-user-configs --user-config mine.json \
+  --user-target 127.0.0.1:9000 --cores zray,xray,singbox
+```
+
+Both rows include whatever network is in the way. They are comparable between
+cores only when every core reached the same endpoint, which the row shows.
 
 ## The measurement
 

@@ -64,6 +64,7 @@ while read -r value; do add --exclude "$value"; done < <(split "${BENCH_EXCLUDE:
 while read -r value; do add --user-config-url "$value"; done < <(split "${BENCH_URLS:-}")
 
 [[ -n "${BENCH_USER_DIR:-}" ]] && add --user-config-dir "$BENCH_USER_DIR"
+[[ -n "${BENCH_USER_TARGET:-}" ]] && add --user-target "$BENCH_USER_TARGET"
 [[ -n "${BENCH_BASE_REF:-}" ]] && add --base-ref "$BENCH_BASE_REF"
 [[ -n "${BENCH_GATE:-}" ]] && add --gate-regression "$BENCH_GATE"
 if [[ -n "${BENCH_EXTRA:-}" ]]; then

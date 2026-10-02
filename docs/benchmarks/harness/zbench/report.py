@@ -48,6 +48,7 @@ HEADLINE = {
     matrix.UDP: ("latency_us_median", "us", False),
     matrix.HOLD: ("rss_peak_mb", "MB resident", False),
     "passthrough": ("throughput_mbps", "Mbit/s", True),
+    "tunnel": ("ops_per_s", "tunnels/s", True),
 }
 
 #: A cell at or above this fraction of the measured harness ceiling is limited
@@ -154,6 +155,18 @@ def aggregate(result: Result) -> dict:
         cells_here = [c for (s, _), group in grouped.items() if s == scenario for c in group]
         workload = cells_here[0].workload
         group = cells_here[0].group
+        if workload == "passthrough":
+            # A supplied config is measured either by moving bytes at a named
+            # destination or, with no destination named, by whether its tunnel
+            # comes up and how fast. Reporting the throughput of the second as a
+            # blank cell is worse than reporting the number it did measure, so
+            # the row's headline is chosen from what the cells hold.
+            measured = any(
+                cells[0].throughput_mbps is not None
+                for (s, _c), cells in grouped.items()
+                if s == scenario
+            )
+            workload = "passthrough" if measured else "tunnel"
         field, unit, higher_better = HEADLINE.get(workload, HEADLINE[matrix.DOWN])
         entry: dict = {
             "workload": workload,
@@ -643,10 +656,14 @@ def render_markdown(result: Result, agg: dict, cover: dict) -> str:
         add("## Configurations supplied from outside this repository")
         add("")
         add(
-            "Measured in place: the load generator is pointed at the address in the "
-            "config itself, so these rows include whatever network is in the way. They "
-            "are comparable between cores only when every core reached the same "
-            "destination, which the table shows per row."
+            "Measured in place, so these rows include whatever network is in the "
+            "way. They are comparable between cores only when every core reached the "
+            "same endpoint, which each row's status shows. A config is measured one "
+            "of two ways, and the row says which: with `--user-target`, by moving "
+            "bytes to that destination; without one, by whether the tunnel to the "
+            "config's own server comes up and how fast. The second is what any config "
+            "supports, because the only endpoint a config names is its own proxy "
+            "server, which does not answer this harness's protocol."
         )
         add("")
         add("| Config | Kind | Local port | Destination | Runnable | Problems |")

@@ -218,6 +218,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="an https:// configuration or subscription to fetch and measure; repeatable",
     )
     parser.add_argument(
+        "--user-target",
+        default=None,
+        metavar="HOST:PORT",
+        help=(
+            "a destination that speaks this harness's protocol, for the supplied "
+            "configurations to be measured moving bytes against -- typically a "
+            "sink the caller runs. Without it a supplied config is still tested, "
+            "but only for whether its tunnel comes up and how fast, because the "
+            "only endpoint such a config names is its own proxy server"
+        ),
+    )
+    parser.add_argument(
         "--only-user-configs",
         action="store_true",
         help="skip the scenario matrix and measure only the supplied configurations",
@@ -383,6 +395,24 @@ def main(argv: list[str] | None = None) -> int:
             urls=args.user_config_url,
             workdir=workdir,
         )
+        if args.user_target:
+            host, _, port = args.user_target.rpartition(":")
+            if not host or not port.isdigit():
+                raise SystemExit(
+                    f"--user-target must be HOST:PORT, got {args.user_target!r}"
+                )
+            for config in supplied:
+                config.measure_host = host
+                config.measure_port = int(port)
+            runner.log(
+                f"supplied configurations will be measured moving bytes against "
+                f"{host}:{port}"
+            )
+        elif supplied:
+            runner.log(
+                "no --user-target, so supplied configurations are checked for "
+                "whether the tunnel comes up and how fast; nothing is transferred"
+            )
         if supplied:
             for config in supplied:
                 if config.kind in ("link", "subscription"):

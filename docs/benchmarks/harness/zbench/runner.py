@@ -44,6 +44,10 @@ STATUS_SKIPPED = "skipped"
 STATUS_ERROR = "error"
 STATUS_TIMEOUT = "timeout"
 
+#: Flows a supplied configuration is measured with. One number for every such
+#: run, so a ceiling measured at it can be compared across configs and cores.
+USER_CONFIG_STREAMS = 4
+
 
 def log(message: str) -> None:
     stamp = time.strftime("%H:%M:%S")
@@ -780,7 +784,7 @@ class Runner:
         cell.flows_opened = output.get("flows_opened")
         cell.open_ms = output.get("open_ms")
         wall_ms = output.get("wall_ms") or output.get("total_ms") or 0.0
-        if cell.workload in (matrix.LATENCY, matrix.CHURN, matrix.UDP):
+        if cell.workload in (matrix.LATENCY, matrix.CHURN, matrix.UDP, "passthrough"):
             # `iterations` is already the number the generator recorded; the warmup
             # iterations are never counted in it. Subtracting them again dropped
             # the numerator, and dividing by a window that includes the warmup
@@ -935,6 +939,7 @@ class Runner:
             core=core_id,
             repeat=0,
             status=STATUS_SKIPPED,
+            streams=USER_CONFIG_STREAMS,
         )
         if not config.runnable:
             cell.status = STATUS_SKIPPED
@@ -959,15 +964,36 @@ class Runner:
                 return cell
             time.sleep(0.7)
             cell.rss_idle_mb = _mb(measure.read_rss_kb(proc.pid))
+            if config.can_transfer:
+                target = f"{config.measure_host}:{config.measure_port}"
+                args = [
+                    "--target", target,
+                    "--mode", "down",
+                    "--bytes", str(self.bytes_override or 128 * 1024 * 1024),
+                    "--streams", str(USER_CONFIG_STREAMS),
+                ]
+                ceiling = self.ceiling_for(USER_CONFIG_STREAMS)
+            else:
+                # No destination was named, so bytes are not moved. The endpoint
+                # this config names is its own proxy server, which does not speak
+                # the harness's framed protocol, and pointing a transfer at it
+                # fails every time regardless of the core. What can be measured
+                # for any config is whether the tunnel comes up and how long the
+                # whole path takes, and that is what is measured.
+                target = f"{config.target_host}:{config.target_port}"
+                args = [
+                    "--target", target,
+                    "--mode", "probe",
+                    "--iterations", "200",
+                    "--warmup", "10",
+                ]
+                ceiling = None
             with measure.Sampler(proc.pid) as sampler:
                 output = self._loadgen(
                     [
                         "run",
                         "--proxy", f"127.0.0.1:{port}",
-                        "--target", f"{config.target_host}:{config.target_port}",
-                        "--mode", "down",
-                        "--bytes", str(self.bytes_override or 128 * 1024 * 1024),
-                        "--streams", "4",
+                        *args,
                         "--handshake-timeout-ms", "20000",
                         "--json",
                     ],
@@ -975,8 +1001,13 @@ class Runner:
                 )
                 window = measure.summarise(sampler.samples, proc.pid)
             if output is None:
-                cell.status = STATUS_TIMEOUT
-                cell.reason = "the load generator did not finish in time"
+                # Same distinction as the matrix: a hang and a crash are different
+                # findings, and only the generator can say which one happened.
+                fault = self._loadgen_fault or "the load generator failed"
+                cell.status = (
+                    STATUS_TIMEOUT if fault.startswith("did not finish") else STATUS_ERROR
+                )
+                cell.reason = fault
                 return cell
             if output.get("errors"):
                 errors = [str(e) for e in output["errors"]]
@@ -999,8 +1030,22 @@ class Runner:
                 cell.diagnostic = proc.log_tail(400)
                 return cell
             self._fill(cell, output, window)
+            if not config.can_transfer:
+                # The tunnel time is the measurement here, so it is read from the
+                # probe's own distribution rather than left only in the raw output.
+                tunnel = output.get("tunnel_us") or {}
+                cell.latency_us_median = tunnel.get("median")
+                cell.latency_us_p95 = tunnel.get("p95")
+                cell.throughput_mbps = None
+                if cell.harness_ceiling_mbps is not None and ceiling is None:
+                    cell.harness_ceiling_mbps = None
             cell.status = STATUS_MEASURED
-            cell.reason = f"destination {config.target_host}:{config.target_port}"
+            cell.reason = (
+                f"transferred to {config.measure_host}:{config.measure_port}"
+                if config.can_transfer
+                else f"tunnel to {config.target_host}:{config.target_port}; no "
+                f"destination was supplied, so no bytes were moved"
+            )
         finally:
             proc.stop()
         return cell

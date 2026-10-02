@@ -48,6 +48,15 @@ class UserConfig:
     proxy_port: int | None
     target_host: str | None
     target_port: int | None
+    """The proxy's own server address, from the first proxy outbound.
+
+    This is where the tunnel goes, which makes it the right target for measuring
+    whether the tunnel comes up and how fast -- and the wrong target for moving
+    bytes, because that endpoint speaks the proxy protocol rather than the
+    harness's. `measure_host`/`measure_port` is the destination to push bytes to.
+    """
+    measure_host: str | None = None
+    measure_port: int | None = None
     problems: list[str] = field(default_factory=list)
     kind: str = "json"
     """`json`, `subscription` or `link`. The last two are share links that still
@@ -58,6 +67,16 @@ class UserConfig:
     @property
     def runnable(self) -> bool:
         return not self.problems
+
+    @property
+    def can_transfer(self) -> bool:
+        """Whether a byte-moving measurement is possible for this config.
+
+        Only when the caller named a destination. Without one the harness reports
+        tunnel establishment and latency, which every config supports, rather than
+        sending a payload to a port that cannot answer it.
+        """
+        return bool(self.measure_host and self.measure_port)
 
     def summary(self) -> dict:
         return {
