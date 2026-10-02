@@ -344,7 +344,12 @@ jobs:
           export BENCH_BYTES="${{ inputs.bytes || '512M' }}"
           export BENCH_ITERATIONS="${{ inputs.iterations || '1000' }}"
           export BENCH_BASE_REF="${{ steps.base.outputs.value }}"
-          export BENCH_GATE="${{ inputs.gate_regression }}"
+          # A pull request has no `inputs`, so this gate was only ever reachable
+          # from workflow_dispatch -- the one case where the base build is not
+          # the point. Without a default the PR job built a base, compared
+          # against it, reported the comparison, and then gated nothing, so a
+          # regression could merge having been measured.
+          export BENCH_GATE="${{ inputs.gate_regression || '5' }}"
           bash .github/scripts/bench-args.sh | tee "$RUNNER_TEMP/command"
           {
             echo "## Command"
