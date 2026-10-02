@@ -1,0 +1,5 @@
+# Written by a run, never committed: a results directory whose value is in the
+# commit it was taken on, and that pairing lives in the workflow run.
+/results/
+__pycache__/
+*.pyc

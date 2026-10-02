@@ -1,64 +1,232 @@
-# Zray-core vs Xray-core benchmark
+# Benchmarks
 
-The charts in the main README come from this harness. Everything needed to
-reproduce them is in [`harness/`](harness).
+Zray measured against [Xray-core](https://github.com/XTLS/Xray-core),
+[sing-box](https://github.com/SagerNet/sing-box) and
+[xray-rust](https://github.com/aimalygin/xray-rust), in GitHub Actions, on a
+recorded runner.
 
-## Setup
+```sh
+# in CI: Actions -> benchmark -> Run workflow
+#   cores, suite, repeats, and your own configurations
+# locally, for a quick look (this is not where results come from)
+cd docs/benchmarks/harness
+python3 bench.py --suite smoke
+```
 
-- **Xray-core** v26.3.27 (official `Xray-linux-64` release build) against
-  **Zray-core** 0.1.0 (`cargo build --release -p zray-cli`).
-- Same machine for everything: 4 vCPU Intel Xeon @ 2.80 GHz, 15 GB RAM,
-  Linux 6.18, loopback network.
-- One **Xray-core** server for both runs, so the only thing that changes is
-  the client core. The client under test is started from the *same* JSON
-  config (Zray reads Xray configs as they are):
-  - `client-tls.json`: SOCKS inbound → VLESS over TCP + TLS 1.3 (private CA
-    verified with `usage: "verify"`; Zray refuses `allowInsecure`).
-  - `client-plain.json`: SOCKS inbound → VLESS over plain TCP.
-- `loadgen` opens SOCKS5 connections through the client to a local data sink
-  and moves 2 GB per test, split over 1, 8 or 64 parallel streams.
-- Each test runs 3 times on a freshly started client; the median is reported.
+## What comes out
 
-## What is measured
+| File | What it is |
+|---|---|
+| `report.md` | the tables: throughput, CPU per gibibyte, memory, setup cost, coverage, and what is missing |
+| `results.json` | every cell, every status, every diagnostic, machine readable |
+| `manifest.json` | the digest of every artefact, the binary digests, the host, and the replay command |
+| `commands.sh` | the exact command that produced the run |
+| `charts/*.png` | coverage, capability gaps, per-group metrics, and the run's own resolution |
+| `../protocol-support.md` | the published comparison of what each project can be *configured* to do |
+
+`python3 validate_results.py <dir>` re-derives every aggregate from the raw
+cells and fails if any of them disagrees. It runs in CI on every run.
+
+## Running it in CI
+
+`.github/workflows/benchmark.yml` has three jobs.
+
+**`capability`** runs on every pull request that touches `crates/` or this
+directory. It starts no long-lived process and moves no bulk data: every core's
+own config validator is handed each generated configuration and its answer is
+recorded. This is the job that shows, in review, that a connection type has
+stopped being accepted by one of the four cores. It also checks that
+`protocol-support.md` matches the capability data in the code, so the published
+table cannot drift.
+
+**`measure`** runs the suite. On a pull request or a push to `main` that is
+`standard`; on a schedule it is `full`; on `workflow_dispatch` it is whatever
+you ask for. It records the runner's hardware and its load average, uploads the
+whole result directory as an artefact, and appends the report to the job
+summary.
+
+**`comment`** posts the report on the pull request, replacing the previous one.
+It is skipped for pull requests from forks, where the token cannot write.
+
+### Supplying your own configurations
+
+`workflow_dispatch` takes a `user_configs` textarea and a `user_config_urls`
+field. Paste one JSON document per block, or a base64 subscription body, or
+share links:
+
+```
+vless://00000000-0000-4000-8000-000000000001@example.com:443?encryption=none&security=tls&type=ws#one
+vless://00000000-0000-4000-8000-000000000002@example.org:443?encryption=none&security=reality#two
+```
+
+A share link or a subscription is converted once, with `zray preset`, and the
+resulting file is what all four cores are given. That is deliberate: translating
+a link per core would compare the four link parsers rather than the four
+transports, and a mistranslation would look like a missing feature. The report
+records that the conversion happened.
+
+A configuration that is already JSON is measured as it stands. Two things are
+then required of it, and both are reported per row rather than assumed:
+
+* a local `socks`, `mixed` or `http` inbound, so there is a port to drive;
+* a server address in the first proxy outbound, which is the destination.
+
+The load generator is pointed at that destination, so these rows include whatever
+network is in the way. They are comparable between cores only when every core
+reached the same endpoint, which the row shows.
+
+## The measurement
+
+### What is measured
 
 | Metric | How |
 |---|---|
-| Throughput | bytes moved ÷ wall-clock time, in MB/s |
-| CPU per GB | client process `utime + stime` (from `/proc/<pid>/stat`) ÷ GB moved |
-| Idle memory | client `VmRSS` 1.5 s after start, before any traffic |
-| Peak memory | client `VmHWM` after all tests |
+| Throughput | validated bytes over the transfer window, first payload byte to last |
+| CPU per gibibyte | client process `utime + stime` over the sample window, divided by the bytes the client moved |
+| Idle memory | the client's resident set 0.7 s after its port accepts a connection, before any traffic |
+| Peak memory | the maximum of the sampled resident set during the scenario |
+| Connect time | the three stages separately: TCP connect, SOCKS greeting, SOCKS request |
+| Round trip | a full validated request and response, with percentiles |
+| Setup rate | completed connect-and-close cycles per second |
+| Thread count | peak, where the platform exposes it |
+| Server cost | the server process's own CPU and peak memory, because it shares loopback CPU with the client |
 
-## Results (medians)
+### The four rules that make it mean something
 
-| | Xray-core | Zray-core | |
-|---|---:|---:|---|
-| TLS, 1 stream ↓ | 349 MB/s | **532 MB/s** | +53% |
-| TLS, 8 streams ↓ | 826 MB/s | **911 MB/s** | +10% |
-| TLS, 64 streams ↓ | 758 MB/s | **828 MB/s** | +9% |
-| TLS, 1 stream ↑ | 342 MB/s | **353 MB/s** | +3% |
-| TLS, CPU per GB (1 stream ↓) | 3.01 s | **1.62 s** | −46% |
-| Plain TCP, 1 stream ↓ | **873 MB/s** | 799 MB/s | −8% |
-| Plain TCP, 8 streams ↓ | 1239 MB/s | **1345 MB/s** | +9% |
-| Plain TCP, 64 streams ↓ | 1085 MB/s | **1344 MB/s** | +24% |
-| Plain TCP, 1 stream ↑ | 818 MB/s | **877 MB/s** | +7% |
-| Idle memory | 29.3 MB | **8.0 MB** | 3.7× less |
-| Peak memory (TLS run) | 51.5 MB | **21.1 MB** | 2.4× less |
+**The payload is validated.** The sink writes a deterministic keystream and the
+generator checks every byte, and each concurrent flow uses a different region of
+it, so a core that interleaves two sessions' bytes onto one carrier is caught
+rather than hidden behind a correct total. An unvalidated stream measures how
+fast the harness can read.
 
-Zray-core uses less CPU per gigabyte in every test. The one result where
-Xray-core is faster, a single plain-TCP download, is shown as measured.
-Raw numbers are in [`results.json`](results.json).
+**The transfer window excludes setup.** Connection establishment is reported in
+its own columns. A core that answers SOCKS before it dials and one that dials
+first hide that difference inside a wall-clock rate, and the difference is
+exactly what someone reading these numbers wants to see.
 
-## Running it
+**The harness has a published ceiling.** Before the first scenario, the same
+validated loop runs over a bare socket with no core in the path. A row at or
+above 85% of that ceiling is bounded by the generator, and the report says so on
+the row and in the confounders. A chart that implied more precision than the
+harness has would be a chart that lied quietly.
 
-```sh
-cargo build --release -p zray-cli                      # from the repo root
-cd docs/benchmarks/harness
-# Put an Xray-core binary here as ./xray, then create a private CA and a
-# server certificate for bench.local (ca.pem, cert.pem, key.pem).
-(cd loadgen && cargo build --release)
-python3 run.py      # writes results.json
-python3 charts.py   # writes the PNG charts (needs matplotlib)
+**Order is rotated and then reversed.** Within a repeat, every core is measured
+back to back for the same scenario; the order is rotated by the repeat index and
+reversed on alternate repeats. Comparisons are therefore paired on the repeat
+index, and each interval is a bootstrap over those pairs. The report also prints
+the baseline core measured against itself, so the size of an effect and the size
+of the run's noise can be read on the same row.
+
+### Suites
+
+| Suite | Scenarios | Approximate cost on a shared runner |
+|---|---:|---|
+| `smoke` | 11 | minutes |
+| `standard` | 43 | under an hour |
+| `full` | 50 | hours, including a 5000-flow memory row and the UDP rows |
+
+```
+--only SUBSTRING     run only scenarios whose id contains this (repeatable)
+--exclude SUBSTRING  skip scenarios whose id contains this (repeatable)
+--runs N             repeats per cell; three is the minimum worth reading
+--bytes 512M         bytes per transfer sample
+--iterations 1000    round trips per latency and setup sample
+--cores a,b,c        comma separated; the first is the baseline
+--server-core NAME   the core that serves the proxy side of every cell
+--probe-only         ask each core whether it accepts the config; no traffic
 ```
 
-Loopback numbers show how much work each core does per byte; they are not
-what you will see over a real internet link, where the network is the limit.
+`--only vless-raw-tls` narrows a run to one connection type, which is the fast
+way to see whether a change moved it.
+
+## What is measured on the server side
+
+One server process serves every client for a given link, so the client is the
+only thing that varies across a row. The server core is a single choice for a
+run (`--server-core`, default `xray`) and is named in the report. A link the
+server core cannot serve is skipped with the reason, never quietly measured
+against a different server.
+
+## Where the four cores differ
+
+`../protocol-support.md` is generated from `zbench/caps.py` and is the answer to
+"what can each project be configured to do". It is much larger than the
+benchmark, because a loopback benchmark cannot reach most of it. Two of its
+charts are the fastest way to see a gap:
+
+* `protocol-transport-grid.png` -- one panel per core, protocol against
+  transport, `1.00` where the core can be configured for that combination and
+  `0.00` where it cannot. The empty cells are the gaps.
+* `capability-surface.png` -- every row of the published table, all four cores,
+  on one scale, so a column reads top to bottom.
+
+A few differences that change how a row should be read:
+
+* **xray-rust has no server mode.** Its inbounds are socks, http and tun, and
+  server-side VLESS is a stated non-goal, so it is only ever measured as a
+  client. It publishes no binaries; the harness builds a pinned tag, and records
+  a digest for whatever it built.
+* **sing-box cannot be given a private CA as a client.** The generated client
+  uses `insecure: true` against a loopback-only certificate, while Zray and
+  Xray-core verify the chain. The TLS rows therefore differ in certificate
+  verification as well as in the core.
+* **A REALITY server rejects clients outside `minClientVer`.** Xray-core's default
+  lower bound is the current Xray version. The generated fixture widens both
+  bounds, because otherwise the row measures a version string rather than the
+  protocol.
+* **Where a core's own config check refuses a combination, that is recorded as a
+  measurement**, with the diagnostic, and distinguished in the report from a core
+  that accepted the config and then failed to carry traffic.
+
+## Adding a scenario
+
+Add it to `zbench/matrix.py`. The link axes are a `Link` (protocol, transport,
+security, and the Vision and mux attributes), the workload is a mode the load
+generator implements, and the suite list decides when it runs. Two things are
+worth knowing:
+
+* If a core cannot be configured for the combination, the harness finds that out
+  from the core's own validator and records it. There is no need to keep the
+  capability table in step by hand for it to be correct in the run's output.
+* If the load generator cannot express the combination in a core's dialect, the
+  cell is skipped with that reason, never approximated.
+
+## Adding a core
+
+Add a `Core` to `zbench/caps.py` with its dialect, its protocol and transport
+sets, and a `resolve_*` function in `zbench/cores.py` that finds or builds the
+binary, plus the argv that runs a config and the argv that validates one. A core
+that cannot be built is recorded as unavailable with the reason and the run
+continues with the rest; a run with fewer than two cores fails unless
+`--allow-single-core` is given.
+
+## Layout
+
+```
+harness/
+  bench.py              the command line
+  validate_results.py   re-derives every aggregate; fails on a disagreement
+  split_configs.py      turns the workflow's textarea into files
+  requirements.txt      matplotlib, for the charts only
+  loadgen/              the traffic generator and the data sink, stdlib only
+  zbench/
+    caps.py             what each core can do, and the published comparison table
+    cores.py            finding, building, starting and reaping each core
+    configs.py          one configuration per dialect, for the same job
+    matrix.py           the scenarios and the suites
+    measure.py          sampling a running process
+    stats.py            medians, spread, paired bootstrap intervals
+    runner.py           the loop
+    report.py           tables, coverage, confounders, charts
+    support_doc.py      the generated comparison document
+    userconfig.py       configurations supplied from outside the repository
+```
+
+## History
+
+The numbers in the repository README come from an earlier harness that measured
+one protocol at two security layers against one comparator, on a 4-vCPU Xeon.
+They are kept in [`results/2026-04-legacy/`](results/2026-04-legacy/) with the
+method that produced them, because a published claim should stay backed by a
+file. They were measured on different hardware from the current runs and are
+not comparable with them; the README table says so where it appears.
