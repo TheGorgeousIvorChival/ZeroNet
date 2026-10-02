@@ -117,10 +117,9 @@ fn lens() -> Vec<usize> {
     v
 }
 
-/// Every length the ladder can take a different branch on, crossed with block
-/// offsets that exercise a non-zero counter, an in-place XOR and a
-/// buffer-to-buffer XOR. The gate runs before any timing, so a wrong ladder
-/// never gets to be a fast ladder.
+/// Every length the shipped core can take a different branch on, crossed with
+/// block offsets that exercise a non-zero counter. The gate runs before any
+/// timing, so a wrong core never gets to be a fast one.
 fn verify_chacha(key: &[u8; 32], nonce: &[u8; 12]) -> usize {
     use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 
@@ -145,51 +144,9 @@ fn verify_chacha(key: &[u8; 32], nonce: &[u8; 12]) -> usize {
                 c.seek(start * 64);
                 c.apply_keystream(&mut want);
 
-                // buffer to buffer
-                let mut got = vec![0u8; len];
-                unsafe {
-                    chacha::stream_xor(
-                        k,
-                        n,
-                        start,
-                        inp.as_ptr(),
-                        got.as_mut_ptr(),
-                        len,
-                    )
-                };
-                assert_eq!(want, got, "ladder differs: start {start} len {len}");
-
-                // in place
-                let mut inplace = inp.clone();
-                unsafe {
-                    chacha::stream_xor(
-                        k,
-                        n,
-                        start,
-                        inplace.as_ptr(),
-                        inplace.as_mut_ptr(),
-                        len,
-                    )
-                };
-                assert_eq!(want, inplace, "ladder in-place differs: start {start} len {len}");
-
-                // the two comparison policies, so a bad one is caught here
-                // rather than being reported as a fast number
-                let mut g2 = vec![0u8; len];
-                unsafe {
-                    chacha::stream_xor_wide(k, n, start, inp.as_ptr(), g2.as_mut_ptr(), len)
-                };
-                assert_eq!(want, g2, "wide differs: start {start} len {len}");
-
-                let mut g3 = vec![0u8; len];
-                unsafe {
-                    chacha::stream_xor_narrow(k, n, start, inp.as_ptr(), g3.as_mut_ptr(), len)
-                };
-                assert_eq!(want, g3, "narrow differs: start {start} len {len}");
-
-                let mut g4 = inp.clone();
-                chacha::portable::stream_xor(k, n, start, &inp, &mut g4, len);
-                assert_eq!(want, g4, "portable differs: start {start} len {len}");
+                let mut got = inp.clone();
+                chacha::xor_keystream(k, n, start as u32, &mut got);
+                assert_eq!(want, got, "start {start} len {len}");
 
                 shapes += 1;
             }
@@ -198,23 +155,17 @@ fn verify_chacha(key: &[u8; 32], nonce: &[u8; 12]) -> usize {
     shapes
 }
 
-/// Times every arm at one length. `iters` scales the budget, so a length that
-/// looks marginal can be re-measured on its own without re-running the sweep.
-fn measure(len: usize, key: &[u8; 32], nonce: &[u8; 12], iters: u64) -> [f64; 5] {
+/// Times both candidates at one length. `iters` scales the budget, so a length
+/// that looks marginal can be re-measured on its own without re-running the
+/// whole sweep.
+fn measure(len: usize, key: &[u8; 32], nonce: &[u8; 12], iters: u64) -> [f64; 2] {
     use cipher::{KeyIvInit, StreamCipher};
 
     let inp: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
-    let mut o = [vec![0u8; len], vec![0u8; len], vec![0u8; len], vec![0u8; len], vec![0u8; len]];
+    let mut o = [inp.clone(), inp.clone()];
     // Raw pointers, captured by copy, so no closure holds a borrow of `o` and
     // the buffers can still be made observable after the timing.
-    let src = inp.as_ptr();
-    let dst: [*mut u8; 5] = [
-        o[0].as_mut_ptr(),
-        o[1].as_mut_ptr(),
-        o[2].as_mut_ptr(),
-        o[3].as_mut_ptr(),
-        o[4].as_mut_ptr(),
-    ];
+    let dst: [*mut u8; 2] = [o[0].as_mut_ptr(), o[1].as_mut_ptr()];
 
     let mut v0 = || {
         let mut c = ChaCha20::new(key.into(), nonce.into());
@@ -222,56 +173,39 @@ fn measure(len: usize, key: &[u8; 32], nonce: &[u8; 12], iters: u64) -> [f64; 5]
         c.apply_keystream(unsafe { std::slice::from_raw_parts_mut(d, len) });
     };
     // Every pointer goes through black_box. Without this the candidate writes
-    // to a buffer nothing ever reads, so on a target where the core inlines to
-    // the same code as the baseline LLVM deletes the whole call: that is how an
-    // earlier run of this harness reported 111863x on x86_64.
-    let mut v1 = || unsafe {
-        chacha::stream_xor(
-            key,
-            nonce,
-            0,
-            std::hint::black_box(src),
-            std::hint::black_box(dst[1]),
-            len,
-        )
-    };
-    let mut v2 = || unsafe {
-        chacha::stream_xor_wide(key, nonce, 0, std::hint::black_box(src), std::hint::black_box(dst[2]), len)
-    };
-    let mut v3 = || unsafe {
-        chacha::stream_xor_narrow(key, nonce, 0, std::hint::black_box(src), std::hint::black_box(dst[3]), len)
-    };
-    let mut v4 = || {
-        let is = unsafe { std::slice::from_raw_parts(src, len) };
-        let os = unsafe { std::slice::from_raw_parts_mut(dst[4], len) };
-        chacha::portable::stream_xor(key, nonce, 0, is, os, len);
+    // to a buffer nothing ever reads and LLVM deletes the whole call: that is
+    // how an earlier run of this harness reported 111863x on x86_64.
+    let mut v1 = || {
+        let dst = std::hint::black_box(dst[1]);
+        chacha::xor_keystream(key, nonce, 0, unsafe {
+            std::slice::from_raw_parts_mut(dst, len)
+        });
     };
 
-    let r = bench_all(iters, &mut [&mut v0, &mut v1, &mut v2, &mut v3, &mut v4]);
+    let r = bench_all(iters, &mut [&mut v0, &mut v1]);
     // The closures hold copies of the raw pointers, never borrows of the
     // buffers, so the buffers are free to be read here.
     for b in o.iter() {
         std::hint::black_box(b);
     }
-    r.try_into().expect("five arms")
+    r.try_into().expect("two arms")
 }
 
-/// The bar the policy that would ship has to clear at every length, on every
-/// runner in the matrix.
+/// The bar the shipped core has to clear at every length, on every runner.
 const GATE: f64 = 1.00;
 
 fn bench_chacha(out: &mut String, key: &[u8; 32], nonce: &[u8; 12]) {
-    let mut rows: Vec<(usize, [f64; 5])> = Vec::new();
+    let mut rows: Vec<(usize, [f64; 2])> = Vec::new();
     for &len in &lens() {
         rows.push((len, measure(len, key, nonce, iters_for(len))));
     }
 
     // Anything under the bar gets re-measured on its own, with four times the
-    // budget, before the job is failed. A shared runner is noisy enough to put
-    // a few percent on any single reading, and a gate that cries wolf gets
-    // switched off; a gate that only fails on a number it has taken three
-    // times does not. The retried row replaces the first reading, so the table
-    // and the gate always agree.
+    // budget, three times over, before the job is failed. A shared runner is
+    // noisy enough to put a few percent on any single reading, and a gate that
+    // cries wolf gets switched off; a gate that only fails on a number it has
+    // taken three times does not. The retried row replaces the first reading, so
+    // the table and the gate always agree.
     let suspects: Vec<usize> = rows
         .iter()
         .filter(|(len, r)| *len > 0 && r[0] / r[1] < GATE)
@@ -307,27 +241,21 @@ fn bench_chacha(out: &mut String, key: &[u8; 32], nonce: &[u8; 12]) {
     let _ = writeln!(out, "### ChaCha20 keystream\n");
     let _ = writeln!(
         out,
-        "`ladder` is the policy that would ship. `GB/s` is its throughput, because a\n\
-         speedup against a baseline that is itself slow says very little about what a\n\
-         caller gets. The one-block rung chose the **{}** core on this machine, by\n\
-         measurement at first use; `narrow` is the SIMD one-block core for every byte\n\
-         and `portable` is the scalar one, so the two columns either side of `ladder`\n\
-         are the two things it could have chosen between.\n",
-        chacha::one_block_choice()
+        "The candidate is `crates/zero-protocol/src/chacha20`, included into this\n\
+         harness rather than copied, so every number here is a number about the code\n\
+         that ships. `GB/s` is its throughput, because a speedup against a baseline\n\
+         that is itself slow says very little about what a caller gets.\n"
     );
-    let _ = writeln!(out, "| len | crate ns | crate GB/s | ladder GB/s | speedup | wide | narrow | portable |");
-    let _ = writeln!(out, "|---:|---:|---:|---:|---:|---:|---:|---:|");
+    let _ = writeln!(out, "| len | crate ns | crate GB/s | shipped GB/s | speedup |");
+    let _ = writeln!(out, "|---:|---:|---:|---:|---:|");
     for (len, r) in &rows {
         let _ = writeln!(
             out,
-            "| {len} | {:.0} | {:.2} | {:.2} | **{:.2}x** | {:.2}x | {:.2}x | {:.2}x |",
+            "| {len} | {:.0} | {:.2} | {:.2} | **{:.2}x** |",
             r[0],
             gbps(*len, r[0]),
             gbps(*len, r[1]),
             r[0] / r[1],
-            r[0] / r[2],
-            r[0] / r[3],
-            r[0] / r[4],
         );
     }
     let _ = writeln!(out);
@@ -341,18 +269,15 @@ fn bench_chacha(out: &mut String, key: &[u8; 32], nonce: &[u8; 12]) {
     );
 
     println!("### ChaCha20 keystream");
-    println!("| len | crate ns | crate GB/s | ladder GB/s | speedup | wide | narrow | portable |");
-    println!("|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("| len | crate ns | crate GB/s | shipped GB/s | speedup |");
+    println!("|---:|---:|---:|---:|---:|");
     for (len, r) in &rows {
         println!(
-            "| {len} | {:.0} | {:.2} | {:.2} | **{:.2}x** | {:.2}x | {:.2}x | {:.2}x |",
+            "| {len} | {:.0} | {:.2} | {:.2} | **{:.2}x** |",
             r[0],
             gbps(*len, r[0]),
             gbps(*len, r[1]),
             r[0] / r[1],
-            r[0] / r[2],
-            r[0] / r[3],
-            r[0] / r[4],
         );
     }
     println!();
