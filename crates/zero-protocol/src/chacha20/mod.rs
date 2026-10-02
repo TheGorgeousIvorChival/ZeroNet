@@ -133,14 +133,41 @@ unsafe fn stream_xor(
         let blocks = rem.div_ceil(64);
         if blocks >= 4 {
             let n = rem.min(256);
-            unsafe { neon4::xor_group(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), n) };
+            unsafe {
+                neon4::xor_group(
+                    key32,
+                    nonce12,
+                    blk(start_block, done),
+                    inp.add(done),
+                    out.add(done),
+                    n,
+                )
+            };
             done += n;
         } else if blocks >= 2 {
             let n = rem.min(128);
-            unsafe { neon2::xor_group(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), n) };
+            unsafe {
+                neon2::xor_group(
+                    key32,
+                    nonce12,
+                    blk(start_block, done),
+                    inp.add(done),
+                    out.add(done),
+                    n,
+                )
+            };
             done += n;
         } else {
-            unsafe { one_block(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), rem) };
+            unsafe {
+                one_block(
+                    key32,
+                    nonce12,
+                    blk(start_block, done),
+                    inp.add(done),
+                    out.add(done),
+                    rem,
+                )
+            };
             return;
         }
     }
@@ -184,7 +211,15 @@ unsafe fn stream_xor_avx2(
     let groups = len / 512;
     let mut done = 0usize;
     for g in 0..groups {
-        unsafe { avx2::xor8(key32, nonce12, blk(start_block, g * 512), inp.add(g * 512), out.add(g * 512)) };
+        unsafe {
+            avx2::xor8(
+                key32,
+                nonce12,
+                blk(start_block, g * 512),
+                inp.add(g * 512),
+                out.add(g * 512),
+            )
+        };
     }
     done = groups * 512;
     loop {
@@ -195,14 +230,41 @@ unsafe fn stream_xor_avx2(
         let blocks = rem.div_ceil(64);
         if blocks >= 4 {
             let n = rem.min(256);
-            unsafe { avx2::xor4(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), n) };
+            unsafe {
+                avx2::xor4(
+                    key32,
+                    nonce12,
+                    blk(start_block, done),
+                    inp.add(done),
+                    out.add(done),
+                    n,
+                )
+            };
             done += n;
         } else if blocks >= 2 {
             let n = rem.min(128);
-            unsafe { avx2::xor2(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), n) };
+            unsafe {
+                avx2::xor2(
+                    key32,
+                    nonce12,
+                    blk(start_block, done),
+                    inp.add(done),
+                    out.add(done),
+                    n,
+                )
+            };
             done += n;
         } else {
-            unsafe { one_block(key32, nonce12, blk(start_block, done), inp.add(done), out.add(done), rem) };
+            unsafe {
+                one_block(
+                    key32,
+                    nonce12,
+                    blk(start_block, done),
+                    inp.add(done),
+                    out.add(done),
+                    rem,
+                )
+            };
             return;
         }
     }
@@ -358,7 +420,9 @@ mod tests {
     /// boundaries either side of each rung, plus a few whole-buffer sizes.
     fn lengths() -> Vec<usize> {
         let mut v: Vec<usize> = (0..=600).collect();
-        v.extend([700, 767, 768, 769, 1000, 1023, 1024, 1025, 1536, 2048, 4096, 8192, 16384]);
+        v.extend([
+            700, 767, 768, 769, 1000, 1023, 1024, 1025, 1536, 2048, 4096, 8192, 16384,
+        ]);
         v
     }
 
@@ -383,7 +447,14 @@ mod tests {
                     // before writing it.
                     let mut sep = vec![0u8; len];
                     unsafe {
-                        stream_xor(k, n, u64::from(start_block), input.as_ptr(), sep.as_mut_ptr(), len)
+                        stream_xor(
+                            k,
+                            n,
+                            u64::from(start_block),
+                            input.as_ptr(),
+                            sep.as_mut_ptr(),
+                            len,
+                        )
                     };
                     assert_eq!(want, sep, "out of place, start {start_block} len {len}");
                 }

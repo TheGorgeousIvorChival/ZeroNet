@@ -258,7 +258,13 @@ pub(super) unsafe fn xor4(
 /// Eight blocks, 512 bytes. Always whole: the ladder sizes this rung in bytes
 /// precisely so that a short message never lands here.
 #[target_feature(enable = "avx2")]
-pub(super) unsafe fn xor8(key32: &[u8; 32], nonce12: &[u8; 12], start: u64, inp: *const u8, out: *mut u8) {
+pub(super) unsafe fn xor8(
+    key32: &[u8; 32],
+    nonce12: &[u8; 12],
+    start: u64,
+    inp: *const u8,
+    out: *mut u8,
+) {
     let st = super::initial_state(key32, nonce12, start as u32);
     let cst = _mm256_broadcastsi128_si256(_mm_loadu_si128(CONSTS.as_ptr().cast::<__m128i>()));
     let k0v = _mm256_broadcastsi128_si256(_mm_loadu_si128(st.as_ptr().add(4).cast::<__m128i>()));

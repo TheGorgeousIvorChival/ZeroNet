@@ -298,12 +298,18 @@ impl ChunkState {
         let split = chunk.len() - TAG_LEN;
         let (body, tag) = chunk.split_at_mut(split);
         match &self.cipher {
-            ChunkCipher::Aes128(c) => {
-                c.decrypt_in_place_detached(Nonce::from_slice(&nonce), &[], body, aes_gcm::Tag::from_slice(tag))
-            }
-            ChunkCipher::Aes256(c) => {
-                c.decrypt_in_place_detached(Nonce::from_slice(&nonce), &[], body, aes_gcm::Tag::from_slice(tag))
-            }
+            ChunkCipher::Aes128(c) => c.decrypt_in_place_detached(
+                Nonce::from_slice(&nonce),
+                &[],
+                body,
+                aes_gcm::Tag::from_slice(tag),
+            ),
+            ChunkCipher::Aes256(c) => c.decrypt_in_place_detached(
+                Nonce::from_slice(&nonce),
+                &[],
+                body,
+                aes_gcm::Tag::from_slice(tag),
+            ),
             ChunkCipher::Chacha(c) => c.decrypt_in_place_detached(&nonce, &[], body, tag),
         }
         .map_err(|_| Error::Crypto)?;

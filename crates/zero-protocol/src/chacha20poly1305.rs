@@ -127,13 +127,15 @@ mod tests {
     /// including the counter offset and the length block.
     #[test]
     fn rfc8439_vector() {
-        let key: [u8; 32] = hex::decode(
-            "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-        let nonce: [u8; 12] = hex::decode("070000004041424344454647").unwrap().try_into().unwrap();
+        let key: [u8; 32] =
+            hex::decode("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let nonce: [u8; 12] = hex::decode("070000004041424344454647")
+            .unwrap()
+            .try_into()
+            .unwrap();
         let aad = hex::decode("50515253c0c1c2c3c4c5c6c7").unwrap();
         let plaintext = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
         let expected: Vec<u8> = hex::decode(concat!(
@@ -151,7 +153,9 @@ mod tests {
         let cipher = ChaCha20Poly1305::new_from_slice(&key).unwrap();
 
         let mut sealed = plaintext.to_vec();
-        let tag = cipher.encrypt_in_place_detached(&nonce, &aad, &mut sealed).unwrap();
+        let tag = cipher
+            .encrypt_in_place_detached(&nonce, &aad, &mut sealed)
+            .unwrap();
         assert_eq!(sealed, expected);
         assert_eq!(tag, expected_tag);
 
@@ -202,7 +206,9 @@ mod tests {
                     .unwrap();
 
                 let mut got = input.clone();
-                let got_tag = mine.encrypt_in_place_detached(&nonce, ad, &mut got).unwrap();
+                let got_tag = mine
+                    .encrypt_in_place_detached(&nonce, ad, &mut got)
+                    .unwrap();
                 assert_eq!(got, want, "ciphertext len {len} counter {counter}");
                 assert_eq!(got_tag.as_slice(), want_tag.as_slice(), "tag len {len}");
 

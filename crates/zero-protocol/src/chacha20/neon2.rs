@@ -25,7 +25,6 @@ unsafe fn rotl7(v: uint32x4_t) -> uint32x4_t {
     vorrq_u32(vshlq_n_u32(v, 7), vshrq_n_u32(v, 25))
 }
 
-
 /// words 13..15: the nonce half, built once per call.
 #[inline]
 #[target_feature(enable = "neon")]
@@ -536,8 +535,14 @@ unsafe fn rounds_two(o: [uint32x4_t; 8]) -> [uint32x4_t; 8] {
     y3 = vextq_u32(y3, y3, 1);
 
     [
-        vaddq_u32(x0, a0), vaddq_u32(x1, a1), vaddq_u32(x2, a2), vaddq_u32(x3, a3),
-        vaddq_u32(y0, b0), vaddq_u32(y1, b1), vaddq_u32(y2, b2), vaddq_u32(y3, b3),
+        vaddq_u32(x0, a0),
+        vaddq_u32(x1, a1),
+        vaddq_u32(x2, a2),
+        vaddq_u32(x3, a3),
+        vaddq_u32(y0, b0),
+        vaddq_u32(y1, b1),
+        vaddq_u32(y2, b2),
+        vaddq_u32(y3, b3),
     ]
 }
 

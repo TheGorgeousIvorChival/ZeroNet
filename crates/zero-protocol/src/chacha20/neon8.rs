@@ -4,7 +4,6 @@
 //! what a bulk stream spends its time in.
 #![cfg(target_arch = "aarch64")]
 
-
 use chacha20::{ChaCha20, Key as ChaKey, Nonce as ChaNonce12};
 use cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use core::arch::aarch64::*;
@@ -298,7 +297,6 @@ pub(super) unsafe fn stream_xor(
         );
     }
 }
-
 
 /// Bulk-only entry for the combined dispatcher: runs the 8-way core over exactly
 /// `groups * 512` bytes and nothing else, so the caller can hand the tail to a
