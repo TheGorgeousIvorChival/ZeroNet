@@ -373,8 +373,15 @@ def render_markdown(result: Result, agg: dict, cover: dict) -> str:
     add("| Core | Version | Source | SHA-256 (first 16) | Build or download |")
     add("|---|---|---|---|---|")
     for binary in result.binaries:
+        source = binary.get("version_source") or "binary"
+        version = f"`{binary['version']}`"
+        if source != "binary":
+            # A version the binary does not print is a weaker claim than one it
+            # does, and the difference has to be visible rather than implied by
+            # the reader noticing there is no flag.
+            version += f"<br><sub>{_escape(source[:80])}</sub>"
         add(
-            f"| {binary['label']} | `{binary['version']}` | {binary['origin']} | "
+            f"| {binary['label']} | {version} | {binary['origin']} | "
             f"`{binary['binary_sha256'][:16]}` | {binary['build_command'] or '-'} |"
         )
     add("")
@@ -572,6 +579,10 @@ def render_markdown(result: Result, agg: dict, cover: dict) -> str:
     for group in matrix.GROUPS:
         rows = [s for s in agg["scenarios"] if agg["rows"][s]["group"] == group]
         if not rows:
+            continue
+        if result.probe_only:
+            # The coverage table above is the whole result. A performance table
+            # whose every cell reads "nothing measured" is noise around it.
             continue
         add(f"## {group}")
         add("")

@@ -211,6 +211,11 @@ class Runner:
             self.result.unavailable.append(
                 entry.as_dict() if hasattr(entry, "as_dict") else dict(entry)
             )
+        if probe_only:
+            self.result.ceiling_note = (
+                "not measured: a capability probe moves no traffic, so there is "
+                "nothing for the ceiling to bound"
+            )
         for entry in self.result.unavailable:
             self.result.notes.append(
                 f"{entry['core']} was not measured: {entry['reason']}"

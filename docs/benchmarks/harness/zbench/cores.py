@@ -216,6 +216,9 @@ class CoreBinary:
     origin: str
     """`provided`, `built` or `downloaded`. Recorded so a reader knows whether
     the binary is the project's own artifact or something the caller supplied."""
+    version_note: str = ""
+    """Where `version` came from. Empty means the binary printed it, which is the
+    only claim strong enough to compare against a release note."""
     build_command: str = ""
     source_revision: str = ""
     """The commit the binary was built from, when the harness knows it. Empty for a
@@ -231,6 +234,7 @@ class CoreBinary:
             "label": self.core.label,
             "language": self.core.language,
             "version": self.version,
+            "version_source": self.version_note or "binary",
             "binary_sha256": self.digest,
             "binary_path": str(self.path),
             "origin": self.origin,
@@ -240,12 +244,15 @@ class CoreBinary:
         }
 
 
-def _probe_version(core: caps.Core, path: Path) -> str:
-    """Best-effort version string.
+def _probe_version(core: caps.Core, path: Path) -> tuple[str, str]:
+    """(version, where it came from) for a binary.
 
-    A failure here is recorded, not raised: a core that cannot print a version
-    is still measurable, and refusing to measure it would be a worse outcome
-    than reporting the version as unknown.
+    A failure here is recorded, not raised: a core that cannot print a version is
+    still measurable, and refusing to measure it would be a worse outcome than
+    reporting the version as unknown. xray-rust has no version flag at all, so
+    for it the pin is the only version there is -- and saying "unknown" for a
+    binary the harness itself checked out at a named tag throws away the one
+    piece of provenance that exists.
     """
     for argv in (list(core.version_arg), [core.version_arg[0]], ["-v"], ["--version"]):
         try:
@@ -260,8 +267,11 @@ def _probe_version(core: caps.Core, path: Path) -> str:
         text = (proc.stdout or "") + (proc.stderr or "")
         first = next((line.strip() for line in text.splitlines() if line.strip()), "")
         if proc.returncode == 0 and first:
-            return first[:200]
-    return "unknown"
+            return first[:200], "binary"
+    pinned = caps.PINS.get(core.id, {}).get("version", "unknown")
+    if pinned and not str(pinned).startswith("from "):
+        return pinned, "pin: the binary prints no version, so this is the version it was built from"
+    return "unknown", "unknown"
 
 
 def resolve_zray(root: Path, given: Path | None, allow_build: bool) -> CoreBinary:
@@ -282,10 +292,12 @@ def resolve_zray(root: Path, given: Path | None, allow_build: bool) -> CoreBinar
             build_command = "cargo build --release -p zray-cli"
     if not path.exists():
         raise SystemExit(f"zray binary not found: {path}")
+    version, note = _probe_version(caps.ZRAY, path)
     return CoreBinary(
         core=caps.ZRAY,
         path=path,
-        version=_probe_version(caps.ZRAY, path),
+        version=version,
+        version_note=note,
         digest=sha256(path),
         origin=origin,
         build_command=build_command,
@@ -313,10 +325,12 @@ def resolve_xray(bin_dir: Path, given: Path | None, allow_download: bool) -> Cor
         archive.unlink(missing_ok=True)
         origin = "downloaded"
         build_command = f"downloaded {url}"
+    version, note = _probe_version(caps.XRAY, path)
     return CoreBinary(
         core=caps.XRAY,
         path=path,
-        version=_probe_version(caps.XRAY, path),
+        version=version,
+        version_note=note,
         digest=sha256(path),
         origin=origin,
         build_command=build_command,
@@ -345,10 +359,12 @@ def resolve_singbox(bin_dir: Path, given: Path | None, allow_download: bool) -> 
         archive.unlink(missing_ok=True)
         origin = "downloaded"
         build_command = f"downloaded {url}"
+    version, note = _probe_version(caps.SINGBOX, path)
     return CoreBinary(
         core=caps.SINGBOX,
         path=path,
-        version=_probe_version(caps.SINGBOX, path),
+        version=version,
+        version_note=note,
         digest=sha256(path),
         origin=origin,
         build_command=build_command,
@@ -410,10 +426,12 @@ def resolve_xray_rust(
             f"cargo build --locked --release -p xray-cli"
             + (f"  (RUSTUP_TOOLCHAIN={toolchain})" if toolchain else "")
         )
+    version, note = _probe_version(caps.XRAY_RUST, path)
     return CoreBinary(
         core=caps.XRAY_RUST,
         path=path,
-        version=_probe_version(caps.XRAY_RUST, path),
+        version=version,
+        version_note=note,
         digest=sha256(path),
         origin=origin,
         build_command=build_command,
@@ -492,10 +510,12 @@ def resolve_zray_base(
         # makes the next run's `git worktree add` fail, and the next run is the
         # one somebody is waiting on.
         discard()
+    version, note = _probe_version(caps.ZRAY_BASE, binary)
     return CoreBinary(
         core=caps.ZRAY_BASE,
         path=binary,
-        version=_probe_version(caps.ZRAY_BASE, binary),
+        version=version,
+        version_note=note,
         digest=sha256(binary),
         origin="built",
         build_command=(

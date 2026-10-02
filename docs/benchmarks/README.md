@@ -34,10 +34,19 @@ cells and fails if any of them disagrees. It runs in CI on every run.
 **`capability`** runs on every pull request that touches `crates/` or this
 directory. It starts no long-lived process and moves no bulk data: every core's
 own config validator is handed each generated configuration and its answer is
-recorded. This is the job that shows, in review, that a connection type has
-stopped being accepted by one of the four cores. It also runs the harness's own
-nineteen checks and verifies that `protocol-support.md` matches the capability
-data in the code, so the published table cannot drift.
+recorded, with the diagnostic the validator produced. This is the job that shows,
+in review, that a connection type has stopped being accepted by one of the four
+cores.
+
+It also builds xray-rust from its pinned tag, which is the one comparator the
+run is least likely to have otherwise, and whose gaps are the largest: at
+v0.7.0 it refuses `vmess`, `trojan`, `shadowsocks` and `shadowsocks2022` as
+outbound protocols, refuses `tlsSettings.certificates` on any transport other
+than raw, and refuses `mux.enabled`. Those are the project's own diagnostics,
+recorded rather than asserted.
+
+The job runs the harness's twenty checks and verifies that `protocol-support.md`
+matches the capability data in the code, so the published table cannot drift.
 
 **`pr`** runs on every pull request and answers the question a reviewer is
 actually asking: *did this change move the number?* It builds Zray twice -- once
