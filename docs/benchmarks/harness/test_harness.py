@@ -27,6 +27,7 @@ Plain asserts, no test framework, so it runs anywhere the harness runs.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -624,6 +625,69 @@ def _support_doc() -> None:
             f"{core_id}: the pinned version appears more than once in the document"
         )
     assert "## Regenerating" in first
+
+
+@check("the workflow's argument script resolves every option by name")
+def _bench_args_script() -> None:
+    """One implementation of how a run is assembled, and it is checkable.
+
+    The three jobs used to build the list inline. One of them overwrote `--runs`
+    instead of `--cores` by indexing the array by position, so the capability
+    probe silently stopped working on any run where xray-rust failed to build --
+    which is exactly the run where you most want the probe. A positional edit of
+    an argument array is not reviewable either: the diff does not show which
+    element moved.
+    """
+    # harness/ -> benchmarks/ -> docs/ -> the repository root.
+    script = HERE.parents[2] / ".github" / "scripts" / "bench-args.sh"
+    assert script.exists(), f"{script} is missing; the workflow calls it"
+    import subprocess
+    import tempfile
+
+    def assemble(**environment):
+        with tempfile.TemporaryDirectory() as raw:
+            out = pathlib.Path(raw) / "args"
+            env = dict(os.environ, OUT=str(out))
+            env.update({k: str(v) for k, v in environment.items()})
+            proc = subprocess.run(
+                ["bash", str(script)], env=env, capture_output=True, text=True,
+                timeout=60,
+            )
+            assert proc.returncode == 0, proc.stderr[-400:]
+            return out.read_text().splitlines(), proc.stdout.strip()
+
+    lines, echoed = assemble()
+    assert lines[:2] == ["--suite", "standard"], lines
+    assert "--cores" in lines
+    cores = lines[lines.index("--cores") + 1]
+    assert cores == "zray,xray,singbox,xray-rust", cores
+    # Each option is followed by its own value: a value can never land where a
+    # flag belongs, which is the whole failure mode this replaced.
+    flags = {"--suite", "--server-core", "--runs", "--bytes", "--iterations",
+             "--cores", "--only", "--exclude", "--user-config-url",
+             "--user-config-dir", "--base-ref", "--gate-regression"}
+    for index, item in enumerate(lines):
+        if item in flags:
+            assert index + 1 < len(lines), f"{item} has no value"
+            assert lines[index + 1] not in flags, f"{item} was given a flag as its value"
+    assert echoed.startswith("bench.py "), echoed
+
+    # A base ref puts the base first, so the ratios are against the base.
+    lines, _ = assemble(BENCH_BASE_REF="abc123")
+    cores = lines[lines.index("--cores") + 1]
+    assert cores.startswith("zray-base,"), cores
+    lines, _ = assemble(BENCH_BASE_REF="abc123", BENCH_GATE="5")
+    assert lines[lines.index("--gate-regression") + 1] == "5", lines
+    assert lines[lines.index("--base-ref") + 1] == "abc123", lines
+
+    # An explicit core list still wins over the default.
+    lines, _ = assemble(BENCH_CORES="zray-base,zray", BENCH_BASE_REF="x")
+    assert lines[lines.index("--cores") + 1] == "zray-base,zray", lines
+
+    # Comma separated lists with stray whitespace do not become empty arguments.
+    lines, _ = assemble(BENCH_ONLY=" vless-raw-tls , xhttp ", BENCH_EXCLUDE="")
+    assert lines.count("--only") == 2, lines
+    assert "--exclude" not in lines, "an empty list should add no flag"
 
 
 @check("the regression gate reads the interval and the metric's direction")

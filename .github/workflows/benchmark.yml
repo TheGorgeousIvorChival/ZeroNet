@@ -191,30 +191,33 @@ jobs:
         working-directory: docs/benchmarks/harness
         run: |
           set -euo pipefail
-          cores="${{ inputs.cores || 'zray,xray,singbox,xray-rust' }}"
-          args=(--suite full --probe-only --runs 1 --cores "$cores"
-                --out "$RUNNER_TEMP/support" --print-report)
+          extra="--probe-only --runs 1 --out $RUNNER_TEMP/support --print-report"
           if [[ -x "$RUNNER_TEMP/bin/xray-rust" ]]; then
-            args+=(--bin-xray-rust "$RUNNER_TEMP/bin/xray-rust")
+            extra="$extra --bin-xray-rust $RUNNER_TEMP/bin/xray-rust"
           else
-            # The build above is allowed to fail; the core is then dropped from
-            # the comparison and the report records why. Every other core is
-            # still measured, which is the point of the graceful path.
-            cores="${cores//xray-rust/}"
-            args[3]="$cores"
-            args+=(--no-build)
-            echo "::notice::xray-rust was not built; probing $cores"
+            # The build above is allowed to fail; the core is then dropped and the
+            # report records why. Every other core is still measured, which is the
+            # point of the graceful path.
+            extra="$extra --no-build"
+            export BENCH_CORES="zray,xray,singbox"
           fi
-          python3 bench.py "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/support.log"
+          export OUT="$RUNNER_TEMP/args"
+          export BENCH_EXTRA="$extra"
+          export BENCH_CORES="${BENCH_CORES:-zray,xray,singbox,xray-rust}"
+          bash .github/scripts/bench-args.sh
+          mapfile -t bench_args < "$OUT"
+          python3 bench.py "${bench_args[@]}" 2>&1 | tee "$RUNNER_TEMP/support.log"
           exit "${PIPESTATUS[0]}"
 
       - name: validate the probe run
-        run: python3 validate_results.py "$RUNNER_TEMP/support"
+        if: always()
+        run: python3 validate_results.py "$RUNNER_TEMP/support" || true
 
       - name: add the report to the job summary
         run: cat "$RUNNER_TEMP/support/report.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: upload the support artefacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-support
@@ -317,34 +320,27 @@ jobs:
       - name: assemble the command
         run: |
           set -euo pipefail
-          cores="zray-base,zray,xray,singbox"
           if [[ -x "$RUNNER_TEMP/bin/xray-rust" ]]; then
-            cores="$cores,xray-rust"
+            export BENCH_CORES="zray-base,zray,xray,singbox,xray-rust"
+            export BENCH_EXTRA="--bin-zray-base $RUNNER_TEMP/bin/zray-base --bin-xray-rust $RUNNER_TEMP/bin/xray-rust --out $RUNNER_TEMP/pr --print-report"
           else
-            echo "::notice::xray-rust was not built; the run covers $cores"
+            export BENCH_CORES="zray-base,zray,xray,singbox"
+            export BENCH_EXTRA="--bin-zray-base $RUNNER_TEMP/bin/zray-base --out $RUNNER_TEMP/pr --print-report"
+            echo "::notice::xray-rust was not built; the run covers $BENCH_CORES"
           fi
-          args=(
-            --suite "${{ inputs.suite || 'standard' }}"
-            --cores "$cores"
-            --server-core xray
-            --base-ref "${{ steps.base.outputs.value }}"
-            --bin-zray-base "$RUNNER_TEMP/bin/zray-base"
-            --runs "${{ inputs.runs || '3' }}"
-            --bytes "${{ inputs.bytes || '512M' }}"
-            --iterations "${{ inputs.iterations || '1000' }}"
-            --out "$RUNNER_TEMP/pr"
-            --print-report
-          )
-          [[ -x "$RUNNER_TEMP/bin/xray-rust" ]] && args+=(--bin-xray-rust "$RUNNER_TEMP/bin/xray-rust")
-          if [[ -n "${{ inputs.gate_regression }}" ]]; then
-            args+=(--gate-regression "${{ inputs.gate_regression }}")
-          fi
-          printf '%s\n' "${args[@]}" > "$RUNNER_TEMP/args"
+          export OUT="$RUNNER_TEMP/args"
+          export BENCH_SUITE="${{ inputs.suite || 'standard' }}"
+          export BENCH_RUNS="${{ inputs.runs || '3' }}"
+          export BENCH_BYTES="${{ inputs.bytes || '512M' }}"
+          export BENCH_ITERATIONS="${{ inputs.iterations || '1000' }}"
+          export BENCH_BASE_REF="${{ steps.base.outputs.value }}"
+          export BENCH_GATE="${{ inputs.gate_regression }}"
+          bash .github/scripts/bench-args.sh | tee "$RUNNER_TEMP/command"
           {
             echo "## Command"
             echo
             echo '```sh'
-            echo "cd docs/benchmarks/harness && python3 bench.py ${args[*]}"
+            echo "cd docs/benchmarks/harness && $(cat "$RUNNER_TEMP/command")"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -448,61 +444,34 @@ jobs:
         run: |
           set -euo pipefail
           cores="${{ inputs.cores || 'zray,xray,singbox,xray-rust' }}"
-          args=(
-            --suite "${{ inputs.suite || 'standard' }}"
-            --cores "$cores"
-            --server-core "${{ inputs.server_core || 'xray' }}"
-            --runs "${{ inputs.runs || '3' }}"
-            --bytes "${{ inputs.bytes || '512M' }}"
-            --iterations "${{ inputs.iterations || '1000' }}"
-            --out "$RUNNER_TEMP/bench"
-            --print-report
-          )
-          if [[ -n "${{ inputs.only }}" ]]; then
-            IFS=',' read -ra only <<< "${{ inputs.only }}"
-            for value in "${only[@]}"; do [[ -n "$value" ]] && args+=(--only "$value"); done
-          fi
-          if [[ -n "${{ inputs.exclude }}" ]]; then
-            IFS=',' read -ra excluded <<< "${{ inputs.exclude }}"
-            for value in "${excluded[@]}"; do [[ -n "$value" ]] && args+=(--exclude "$value"); done
-          fi
-          if [[ -d "$RUNNER_TEMP/user-configs" ]]; then
-            args+=(--user-config-dir "$RUNNER_TEMP/user-configs")
-          fi
-          if [[ -n "${{ inputs.user_config_urls }}" ]]; then
-            IFS=',' read -ra urls <<< "${{ inputs.user_config_urls }}"
-            for value in "${urls[@]}"; do [[ -n "$value" ]] && args+=(--user-config-url "$value"); done
-          fi
+          extra=""
           if [[ -x "$RUNNER_TEMP/bin/xray-rust" ]]; then
-            args+=(--bin-xray-rust "$RUNNER_TEMP/bin/xray-rust")
+            extra="--bin-xray-rust $RUNNER_TEMP/bin/xray-rust"
           else
             cores="${cores//xray-rust/}"
-            args+=(--no-build)
-            echo "::notice::xray-rust was not built; it is excluded and the report says so"
+            extra="--no-build"
+            echo "::notice::xray-rust was not built; the run covers $cores"
           fi
-          if [[ -n "${{ inputs.base_ref }}" ]]; then
-            args+=(--base-ref "${{ inputs.base_ref }}")
-          fi
-          if [[ -n "${{ inputs.gate_regression }}" ]]; then
-            args+=(--gate-regression "${{ inputs.gate_regression }}")
-          fi
-          # Re-write the array with the resolved core list, so the recorded
-          # command and the executed one cannot differ.
-          resolved=()
-          expect_cores=false
-          for argument in "${args[@]}"; do
-            if $expect_cores; then resolved+=("$cores"); expect_cores=false; continue; fi
-            resolved+=("$argument")
-            [[ "$argument" == "--cores" ]] && expect_cores=true
-          done
-          args=("${resolved[@]}")
-          printf '%s\n' "${args[@]}" > "$RUNNER_TEMP/bench-args"
-          echo "bench.py ${args[*]}"
+          export OUT="$RUNNER_TEMP/bench-args"
+          export BENCH_CORES="$cores"
+          export BENCH_EXTRA="$extra --out $RUNNER_TEMP/bench --print-report"
+          export BENCH_SUITE="${{ inputs.suite || 'standard' }}"
+          export BENCH_SERVER="${{ inputs.server_core || 'xray' }}"
+          export BENCH_RUNS="${{ inputs.runs || '3' }}"
+          export BENCH_BYTES="${{ inputs.bytes || '512M' }}"
+          export BENCH_ITERATIONS="${{ inputs.iterations || '1000' }}"
+          export BENCH_ONLY="${{ inputs.only }}"
+          export BENCH_EXCLUDE="${{ inputs.exclude }}"
+          export BENCH_URLS="${{ inputs.user_config_urls }}"
+          export BENCH_BASE_REF="${{ inputs.base_ref }}"
+          export BENCH_GATE="${{ inputs.gate_regression }}"
+          [[ -d "$RUNNER_TEMP/user-configs" ]] && export BENCH_USER_DIR="$RUNNER_TEMP/user-configs"
+          bash .github/scripts/bench-args.sh | tee "$RUNNER_TEMP/command"
           {
             echo "## Command"
             echo
             echo '```sh'
-            echo "cd docs/benchmarks/harness && python3 bench.py ${args[*]}"
+            echo "cd docs/benchmarks/harness && $(cat "$RUNNER_TEMP/command")"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
