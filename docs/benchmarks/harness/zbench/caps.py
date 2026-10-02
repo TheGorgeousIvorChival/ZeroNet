@@ -130,6 +130,16 @@ class Core:
     can_serve: bool
     """False when the core has no server-side listener at all."""
     version_arg: tuple[str, ...]
+    client_ca: bool = True
+    """Whether a TLS client can be given a private CA to trust.
+
+    Separate from `securities` on purpose. Being able to speak TLS and being
+    able to be told which certificate authority to trust are different
+    abilities, and this harness's TLS fixtures are signed by a private CA, so a
+    core without this cannot connect to any of them -- no matter how complete
+    its TLS support otherwise is. Claiming the TLS layer and then failing every
+    TLS cell is a wrong capability table, not a benchmark result.
+    """
     notes: dict[str, str] = field(default_factory=dict)
 
     def why_not(self, protocol: str, transport: str, security: str) -> str | None:
@@ -144,6 +154,11 @@ class Core:
             return f"no {transport} transport"
         if security not in self.securities:
             return f"no {security} layer"
+        if security == "tls" and not self.client_ca:
+            return (
+                "no way to trust a private CA, so it cannot connect to a "
+                "certificate this harness generates"
+            )
         return None
 
     def why_not_server(self, protocol: str, transport: str, security: str) -> str | None:
@@ -371,6 +386,10 @@ XRAY_RUST = Core(
     udp=True,
     can_serve=False,
     version_arg=("config", "check"),
+    # Its TLS config has no `certificates` field: a client cannot be given a
+    # trust anchor, so it rejects every TLS fixture this harness builds. Observed
+    # on CI as `tlsSettings.certificates: unsupported field 'certificates'`.
+    client_ca=False,
     notes={
         "server": (
             "No server mode exists. `InboundProtocol` is socks/http/tun and "
@@ -388,6 +407,12 @@ XRAY_RUST = Core(
             "`network: \"h2\"` or `\"quic\"` transports. mKCP is a stated non-goal."
         ),
         "mux": "`mux.enabled` is rejected; mux is not implemented at this version.",
+        "trust": (
+            "The TLS client config has no `certificates` field, so a client "
+            "cannot be given a CA to trust and rejects every fixture signed by a "
+            "private CA. REALITY does work, because REALITY authenticates the "
+            "server with its own key pair rather than with a certificate chain."
+        ),
         "build": (
             "Built from a pinned tag because no binaries are published. The build "
             "depends on a git-pinned `shaped-rustls` fork and a vendored quinn, "
@@ -420,6 +445,7 @@ ZRAY_BASE = Core(
     server_protocols=ZRAY.server_protocols,
     transports=ZRAY.transports,
     securities=ZRAY.securities,
+    client_ca=ZRAY.client_ca,
     vision=ZRAY.vision,
     mux=ZRAY.mux,
     udp=ZRAY.udp,

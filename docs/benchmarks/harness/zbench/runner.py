@@ -55,6 +55,76 @@ def log(message: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+class TlsDest:
+    """A TLS listener that exists to hand out a certificate and nothing else.
+
+    A REALITY server proxies the client's ClientHello to `dest` and serves the
+    certificate it gets back, so `dest` must complete a TLS handshake. It never
+    carries payload: the tunnel's own destination is the sink, and only the
+    certificate travels this way. So this completes the handshake and closes,
+    which is all a REALITY server asks of it.
+    """
+
+    def __init__(self, cert_pem: str, key_pem: str, *, workdir: Path):
+        import ssl
+        import threading
+
+        self._ssl = ssl
+        self._threading = threading
+        self._workdir = workdir
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        cert = workdir / "reality-dest.crt"
+        key = workdir / "reality-dest.key"
+        cert.write_text(cert_pem)
+        key.write_text(key_pem)
+        key.chmod(0o600)
+        context.load_cert_chain(cert, key)
+        self._context = context
+        self._stop = threading.Event()
+        self._port = 0
+
+    def start(self) -> int:
+        import socket
+
+        from .cores import free_port
+
+        self._port = free_port()
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", self._port))
+        listener.listen(128)
+        listener.settimeout(0.5)
+        self._threading.Thread(
+            target=self._serve, args=(listener,), daemon=True
+        ).start()
+        log(f"reality dest: TLS listener on 127.0.0.1:{self._port}")
+        return self._port
+
+    def _serve(self, listener) -> None:
+        while not self._stop.is_set():
+            try:
+                sock, _ = listener.accept()
+            except (TimeoutError, OSError):
+                continue
+            self._threading.Thread(target=self._handshake, args=(sock,), daemon=True).start()
+
+    def _handshake(self, sock) -> None:
+        # Every failure here is routine: the listener is probed by clients that
+        # are not REALITY clients at all, and a rejected handshake is the correct
+        # answer for them.
+        try:
+            with self._context.wrap_socket(sock, server_side=True):
+                pass
+        except Exception:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
 @dataclass
 class Cell:
     scenario: str
@@ -190,6 +260,8 @@ class Runner:
         self.timeout = timeout
         self.harness_ceiling = harness_ceiling
         self.sink_port = sink_port
+        self._reality_dest_port: int | None = None
+        self._reality_dest: "TlsDest | None" = None
         self.probe_only = probe_only
         self.loadgen = self._find_loadgen()
         self.identity = configs.generate_identity(
@@ -300,6 +372,9 @@ class Runner:
             raise SystemExit("the data sink did not start")
 
     def stop_sink(self) -> None:
+        if self._reality_dest_port is not None:
+            self._reality_dest.stop()
+            self._reality_dest_port = None
         for proc in getattr(self, "_sinks", []):
             cores._terminate(proc)
             cores.CHILDREN.discard(proc)
@@ -326,14 +401,30 @@ class Runner:
         )
         value = (out or {}).get("throughput_mbps")
         self._ceilings[streams] = value
-        if streams == 4 and value:
-            self.result.harness_ceiling_mbps = value
-            self.result.ceiling_note = (
-                "measured with the same validated loop and no core in the path, "
-                "on this host, at 4 streams; other stream counts are measured too"
-            )
         if value:
+            # The summary ceiling is the first one measured, not a hardcoded
+            # stream count: no suite uses 4 streams, so pinning the summary to it
+            # meant the ceiling was measured on every run and reported on none.
+            # The per-stream values are what the charts annotate against.
+            if self.result.harness_ceiling_mbps is None:
+                self.result.harness_ceiling_mbps = value
+                self.result.ceiling_note = (
+                    f"measured with the same validated loop and no core in the "
+                    f"path, on this host, at {streams} stream(s); every stream "
+                    f"count a scenario uses is measured separately"
+                )
             log(f"harness ceiling at {streams} stream(s): {value / 1000:.1f} Gbps")
+        elif self.result.harness_ceiling_mbps is None:
+            # A ceiling that could not be measured is a gap in the report, not a
+            # ceiling of zero, and saying so is better than an absent field.
+            self.result.ceiling_note = (
+                f"not measured at {streams} stream(s): the load generator did not "
+                f"return a rate, so the rows below are unbounded by any ceiling"
+            )
+            self.result.notes.append(
+                f"the harness ceiling was not measured at {streams} stream(s); "
+                f"read the rows as unbounded rather than as bounded"
+            )
         return value
 
     # -- loadgen -------------------------------------------------------------
@@ -355,6 +446,27 @@ class Runner:
 
     # -- server --------------------------------------------------------------
 
+    def reality_dest_port(self) -> int:
+        """A port serving TLS, for the links whose server needs one.
+
+        REALITY does not terminate TLS itself: the server proxies the client's
+        ClientHello to `dest` and presents the certificate that comes back, which
+        is what makes an unauthenticated prober see a real website. So `dest`
+        has to answer a TLS handshake, and the traffic sink cannot, because it
+        speaks a length-prefixed keystream rather than TLS. Pointing `dest` at
+        the sink made every REALITY handshake fail on every core -- the server
+        logged the dial failing and closed the connection.
+
+        The listener only completes the handshake and closes. That is enough:
+        the certificate is all the server takes from it.
+        """
+        if self._reality_dest_port is None:
+            self._reality_dest = TlsDest(
+                self.identity.cert_pem, self.identity.key_pem, workdir=self.workdir
+            )
+            self._reality_dest_port = self._reality_dest.start()
+        return self._reality_dest_port
+
     def start_server(self, link: Link) -> tuple[cores.CoreProcess | None, int, str]:
         """Start the single server every client in this link's cells talks to."""
         binary = self.binaries[self.server_core]
@@ -365,8 +477,11 @@ class Runner:
             return None, 0, reason
         port = cores.free_port()
         try:
+            handshake_port = (
+                self.reality_dest_port() if link.security == "reality" else self.sink_port
+            )
             config = configs.server_config(
-                binary.core.dialect, link, self.identity, port, self.sink_port
+                binary.core.dialect, link, self.identity, port, handshake_port
             )
         except configs.UnsupportedShape as exc:
             return None, 0, str(exc)
