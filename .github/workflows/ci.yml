@@ -225,3 +225,20 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: allocation counts and bit-identity
         run: cargo run --release -p hotpath-bench
+
+  # The fuzz crate is a workspace of its own, so `cargo check --workspace` never
+  # looks at it and a target that stopped compiling would not fail anything.
+  # This only builds them; running a fuzzer is a separate, scheduled job,
+  # because a fixed run budget is not a verdict in either direction.
+  fuzz-targets:
+    name: fuzz targets build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # `--locked`, so this uses the committed fuzz lockfile rather than
+      # re-resolving. The lockfile pins the same rustls revision the root
+      # workspace does, and re-resolving would try to fetch that commit again,
+      # which the runner's git cannot do.
+      - name: check the fuzz targets build

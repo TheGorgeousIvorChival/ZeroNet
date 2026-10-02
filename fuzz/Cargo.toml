@@ -12,12 +12,32 @@ cargo-fuzz = true
 # into ordinary `cargo build` of the runtime.
 [workspace]
 
+# `fuzz` is its own workspace, so a `[patch.crates-io]` in the root manifest
+# does not reach it: this crate was resolving stock `rustls` from crates.io
+# rather than the shaping fork, and `zero-security` does not compile against
+# that because it needs the fork's ClientHello control. Both patches are
+# repeated verbatim from the root manifest, including the revision, so the
+# fuzzers test the code that actually ships. The lockfile is what keeps them
+# from drifting apart.
+[patch.crates-io]
+rustls = { git = "https://github.com/aimalygin/shaped-rustls", rev = "3a131beaef0183b0cb61e5a9070a703c6be39ed3" }
+netstack-smoltcp = { path = "../vendor/netstack-smoltcp" }
+
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"
+# `bytes` is what the WebSocket decoder takes its input buffer as, so the
+# target feeds it the same type the transport does rather than a stand-in.
+bytes = "1"
 zero-config = { path = "../crates/zero-config" }
 zero-core = { path = "../crates/zero-core" }
 zero-protocol = { path = "../crates/zero-protocol" }
+# The four wire surfaces the audit found had no fuzzer at all: the TLS 1.3
+# record header, the WebSocket frame decoder, the XHTTP padding generator and
+# the TUN packet parser.
+zero-security = { path = "../crates/zero-security" }
+zero-transport = { path = "../crates/zero-transport" }
+zero-tun = { path = "../crates/zero-tun" }
 
 [[bin]]
 name = "parse_config_array"
@@ -49,3 +69,32 @@ bench = false
 
 [profile.release]
 debug = 1
+
+
+[[bin]]
+name = "tls13_record_header"
+path = "fuzz_targets/tls13_record_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tun_ip_packet"
+path = "fuzz_targets/tun_ip_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ws_frame_decode"
+path = "fuzz_targets/ws_frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xhttp_padding"
+path = "fuzz_targets/xhttp_padding.rs"
+test = false
+doc = false
+bench = false
