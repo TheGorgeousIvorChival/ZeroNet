@@ -1,0 +1,192 @@
+name: crypto bench
+
+# Experiment harness, not shipped code: it measures the proposed ChaCha20/SHA
+# cores on real hardware before any PR exists. Deliberately not wired into `ci`,
+# which must stay a pass/fail gate on the project's own code.
+on:
+  push:
+    branches: ["bench/**"]
+  workflow_dispatch:
+
+# A second push makes the previous run's answer irrelevant.
+concurrency:
+  group: crypto-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write  # only to commit reports back to the bench branch
+
+env:
+  CARGO_TERM_COLOR: always
+  CRYPTO_BENCH_OUT: report.md
+
+jobs:
+  bench:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # aarch64, the server. The pinned chacha20 gates its NEON backend
+          # behind `chacha20_force_neon`, which ZeroNet never sets, so on this
+          # target the crate runs its own portable backend and the comparison is
+          # against 6.9 cycles/byte rather than against SIMD.
+          - name: aarch64-linux (Graviton2)
+            runner: ubuntu-24.04-arm
+            report: ubuntu-24.04-arm
+            rust: stable
+          # aarch64, the other side. Apple silicon is the same ISA as the iOS
+          # target but a completely different core: wider, deeper, and far less
+          # forgiving of a spill. A width that wins on Neoverse and loses on
+          # Firestorm is a width picked on one machine.
+          - name: aarch64-macos (Apple silicon)
+            runner: macos-15
+            report: macos-15
+            rust: stable
+          # x86_64-linux: the default server target, and the one where the crate
+          # already ships a tuned AVX2 backend, so this is the "do not lose to
+          # something good" case rather than the "beat something slow" case.
+          - name: x86_64-linux
+            runner: ubuntu-latest
+            report: ubuntu-latest
+            rust: stable
+          # x86_64-windows: the third OS on the same two ISAs. Anything whose
+          # cost depends on how the compiler happened to lay a struct out is
+          # exactly the kind of thing that moves here.
+          - name: x86_64-windows
+            runner: windows-latest
+            report: windows-latest
+            rust: stable
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: cpu
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.name }}"
+            case "$RUNNER_OS" in
+              Linux) lscpu 2>/dev/null | grep -iE "model name|^flags" | cut -c1-700 ;;
+              macOS) sysctl -n machdep.cpu.brand_string 2>/dev/null
+                     sysctl -n machdep.cpu.features 2>/dev/null | tr '\n' ' ' | cut -c1-700
+                     echo ;;
+              *)     echo "(no lscpu or sysctl on $RUNNER_OS)" ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Both gates live inside this binary. The bit-identity gate runs first, so
+      # a fast-but-wrong core can never be reported as a win. The no-regression
+      # gate runs last and fails the job if the policy that would ship is slower
+      # than the crate at a *single* length on this runner. Four runners, four
+      # independent chances to fail it.
+      - name: bench
+        working-directory: bench/crypto-bench
+        run: cargo run --release
+
+      - name: publish report
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo
+            echo '```'
+            cat bench/crypto-bench/report.md 2>/dev/null || echo "no report produced"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crypto-bench-${{ matrix.report }}
+          path: bench/crypto-bench/report.md
+          if-no-files-found: warn
+
+      # Committing the report back is what makes these numbers reviewable: the
+      # artifact CDN was not reachable from every network this gets read on, and
+      # "every platform" is not a claim anyone can check against a table that
+      # only two of the four runners managed to write down.
+      #
+      # Two things make that step reliable, and both were found the hard way.
+      # `actions/checkout` leaves a detached HEAD, so committing and pushing from
+      # there fails, and retrying with a rebase makes it worse: the rebase tries
+      # to apply a commit the branch already contains. And all four runners push
+      # to the same branch, so whoever finishes first wins and the rest have to
+      # rebase onto whatever landed while they were measuring. Each runner owns
+      # a different report file, so that rebase is a fast-forward in practice --
+      # but only if it is a rebase onto the branch, not onto itself.
+      #
+      # It is a convenience step, not the measurement, so it retries and then
+      # gives up rather than failing the job.
+      - name: commit report
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          cd bench/crypto-bench
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          attach() {
+            git fetch -q origin
+            git checkout -q -B "$GITHUB_REF_NAME" "origin/$GITHUB_REF_NAME"
+            mkdir -p reports
+            cp report.md "reports/$REPORT.md"
+          }
+          export GITHUB_REF_NAME="${{ github.ref_name }}"
+          export REPORT="${{ matrix.report }}"
+          attach
+          for attempt in 1 2 3 4 5; do
+            git add "reports/$REPORT.md"
+            if git diff --cached --quiet; then
+              echo "no change"
+              exit 0
+            fi
+            if git commit -q -m "bench report from ${{ matrix.name }}"; then
+              if git push -q; then
+                echo "pushed on attempt $attempt"
+                exit 0
+              fi
+            fi
+            echo "push lost the race on attempt $attempt; rebasing onto the new tip"
+            attach
+          done
+          echo "gave up pushing the report; it is in the job summary and the artifact"
+
+  # iOS and Android run the same ISA as the two aarch64 runners above, so their
+  # throughput would be a guess dressed up as a number. Whether the cores
+  # *compile* for them is not a guess, and finding that out during a release
+  # instead of on this branch is the expensive way to find out.
+  cross-targets:
+    name: compiles for ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: aarch64-apple-ios
+            target: aarch64-apple-ios
+          - name: aarch64-linux-android
+            target: aarch64-linux-android
+          - name: x86_64-pc-windows-msvc
+            target: x86_64-pc-windows-msvc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # `check`, not `build`: a bin for a foreign target needs that target's
+      # linker, which an ubuntu runner does not have. Type-checking is what
+      # catches a wrong intrinsic or a wrong cfg anyway.
+      - name: check
+        run: cargo check --release --target ${{ matrix.target }} --manifest-path bench/crypto-bench/Cargo.toml

@@ -1,0 +1,31 @@
+[package]
+name = "crypto-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Cross-device benchmark and bit-identity gate for the ChaCha20/SHA cores proposed for ZeroNet."
+
+# Detached from the ZeroNet workspace on purpose: this is an experiment harness,
+# not shipped code, and it must not be pulled into the project's own clippy/test CI.
+[workspace]
+
+[dependencies]
+# Exactly what ZeroNet resolves today.
+chacha20 = "0.9.1"
+cipher = "0.4"
+sha1 = "0.10"
+sha2 = "0.10"
+digest = "0.10"
+sha2_011 = { package = "sha2", version = "0.11" }
+# sha2 0.11 is on digest 0.11 while ZeroNet's pin is on 0.10; two coexisting
+# versions of the same trait is why the 0.11 calls live in their own scope.
+digest_011 = { package = "digest", version = "0.11" }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = "s"
+
+[[bin]]
+name = "crypto-bench"
+path = "src/main.rs"
