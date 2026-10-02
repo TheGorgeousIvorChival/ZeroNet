@@ -5,8 +5,6 @@
 
 use core::arch::aarch64::*;
 
-const CONSTS: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
-
 #[target_feature(enable = "neon")]
 unsafe fn rotl16(v: uint32x4_t) -> uint32x4_t {
     vreinterpretq_u32_u16(vrev32q_u16(vreinterpretq_u16_u32(v)))
@@ -558,7 +556,7 @@ pub(super) unsafe fn xor_group(
     out: *mut u8,
     bytes: usize,
 ) {
-    let cs = vld1q_u32(CONSTS.as_ptr());
+    let cs = vld1q_u32(super::CONSTS.as_ptr());
     let base = nonce_half(nonce12);
     let k0 = vld1q_u32(key32.as_ptr() as *const u32);
     let k1 = vld1q_u32(key32.as_ptr().add(4) as *const u32);

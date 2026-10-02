@@ -4,8 +4,6 @@
 //! what a bulk stream spends its time in.
 #![cfg(target_arch = "aarch64")]
 
-use chacha20::{ChaCha20, Key as ChaKey, Nonce as ChaNonce12};
-use cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use core::arch::aarch64::*;
 
 #[target_feature(enable = "neon")]
@@ -194,113 +192,8 @@ unsafe fn xor_bulk(state: &[u32; 16], inp: *const u8, out: *mut u8, groups: usiz
     }
 }
 
-fn initial_state(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u32; 16] {
-    let mut s = [0u32; 16];
-    s[0] = 0x6170_7865;
-    s[1] = 0x3320_646e;
-    s[2] = 0x7962_2d32;
-    s[3] = 0x6b20_6574;
-    for i in 0..8 {
-        s[4 + i] = u32::from_le_bytes(key[4 * i..4 * i + 4].try_into().unwrap());
-    }
-    s[12] = counter;
-    for i in 0..3 {
-        s[13 + i] = u32::from_le_bytes(nonce[4 * i..4 * i + 4].try_into().unwrap());
-    }
-    s
-}
-
-/// Reference (crate) keystream XOR, kept as the tail + fallback path so exotic
-/// counters and non-aarch64 builds produce the identical byte stream.
-/// `seek_block` is the first block index. SAFETY: `seek_block` must be
-/// seekable by the crate (byte offset `seek_block * 64` must not overflow
-/// and the block must fit the IETF 32-bit counter) — the FFI export
-/// enforces this and returns 3 otherwise, so in-crate callers uphold it
-/// by construction; a violation panics inside the crate (loud, and only
-/// reachable by mis-calling this private helper).
-#[allow(dead_code)]
-fn crate_xor(
-    key: &[u8; 32],
-    nonce: &[u8; 12],
-    seek_block: u64,
-    inp: *const u8,
-    out: *mut u8,
-    len: usize,
-) {
-    let mut c = ChaCha20::new(&ChaKey::from(*key), &ChaNonce12::from(*nonce));
-    if seek_block != 0 {
-        debug_assert!(seek_block.checked_mul(64).is_some());
-        let _ = c.try_seek(seek_block * 64);
-    }
-    // Ensure `out` first holds the pre-XOR bytes (no-op when in place), then
-    // keystream-XOR in place — byte-identical to apply_keystream_b2b.
-    // `copy` (memmove semantics) is used instead of `copy_nonoverlapping`:
-    // the FFI entry rejects partial overlap, so every real call is disjoint
-    // or exactly in-place — but a hostile caller that slips a 1-byte overlap
-    // past the guard must still not trigger UB. `copy` handles overlap
-    // correctly; on the disjoint/in-place fast path it compiles to the same
-    // memcpy/sequence (tail path only, <512B + remainder — no throughput
-    // impact).
-    if !std::ptr::eq(inp, out.cast_const()) {
-        unsafe {
-            std::ptr::copy(inp, out, len);
-        }
-    }
-    let buf = unsafe { core::slice::from_raw_parts_mut(out, len) };
-    c.apply_keystream(buf);
-}
-
-/// # Safety
-/// `key32`/`nonce12` point to 32/12 valid bytes; `inp`/`out` each valid for
-/// `len` bytes (reads for `inp`, reads+writes for `out`); `inp == out` (in
-/// place) or fully disjoint — never partial overlap. Mirrors the FFI contract
-/// every other export here already relies on. Additionally
-/// `start_block + len.div_ceil(64) <= u32::MAX` (the IETF counter range —
-/// the FFI export returns 3 beyond it, so this holds for every real call).
-///
-/// XOR the ChaCha20 keystream (IETF, 96-bit `nonce12`, first block
-/// `start_block`) into `out`, reading source bytes from `inp`.
-#[allow(dead_code)]
-pub(super) unsafe fn stream_xor(
-    key32: &[u8; 32],
-    nonce12: &[u8; 12],
-    start_block: u64,
-    inp: *const u8,
-    out: *mut u8,
-    len: usize,
-) {
-    // The hand core uses the IETF 32-bit block counter (word 12); if the whole
-    // block range stays under 2^32 the 64-bit add never carries into the nonce,
-    // matching the crate exactly. Otherwise defer entirely to the crate.
-    let blocks = len.div_ceil(64) as u64;
-    if start_block
-        .checked_add(blocks)
-        .is_none_or(|end| end > u32::MAX as u64)
-    {
-        crate_xor(key32, nonce12, start_block, inp, out, len);
-        return;
-    }
-    let groups = len / 512;
-    if groups > 0 {
-        let state = initial_state(key32, nonce12, start_block as u32);
-        unsafe { xor_bulk(&state, inp, out, groups) };
-    }
-    let bulk = groups * 512;
-    if len > bulk {
-        crate_xor(
-            key32,
-            nonce12,
-            start_block + (bulk as u64) / 64,
-            unsafe { inp.add(bulk) },
-            unsafe { out.add(bulk) },
-            len - bulk,
-        );
-    }
-}
-
-/// Bulk-only entry for the combined dispatcher: runs the 8-way core over exactly
-/// `groups * 512` bytes and nothing else, so the caller can hand the tail to a
-/// narrower core instead of the crate.
+/// The 8-way core over exactly `groups * 512` bytes and nothing else, so the
+/// ladder can hand the tail to a narrower core.
 #[target_feature(enable = "neon")]
 pub(super) unsafe fn stream_xor_bulk(
     key32: &[u8; 32],
@@ -313,6 +206,6 @@ pub(super) unsafe fn stream_xor_bulk(
     if groups == 0 {
         return;
     }
-    let state = initial_state(key32, nonce12, start_block as u32);
+    let state = super::initial_state(key32, nonce12, start_block as u32);
     unsafe { xor_bulk(&state, inp, out, groups) };
 }
