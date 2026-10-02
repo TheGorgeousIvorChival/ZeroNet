@@ -5,6 +5,7 @@
 //! fallback: an encrypted resolver failure is an error under the default
 //! [`LeakPolicy::Strict`] policy.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -330,6 +331,75 @@ impl Pools {
     }
 }
 
+/// The `regexp:` patterns of one configured server, parallel to its `domains`
+/// list: element `i` is `domains[i]` compiled when that entry is a
+/// [`DomainPattern::Regex`] that compiled, and `None` otherwise.
+type CompiledRegexes = Vec<Option<Regex>>;
+
+/// Compile every `regexp:` domain pattern in `servers`, indexed by server and
+/// then by domain.
+///
+/// The matcher used to compile at match time, and `Regex::new` builds an
+/// automaton: 66 us against 104 ns for five matches of
+/// `^([a-z0-9-]+\.)*example\.com$`. Compiling is what a lookup paid, once per
+/// candidate server. These are static configuration, so they are compiled here
+/// instead -- 20 us for eight servers, once, which a config breaks even on
+/// after a fifth of one uncached query.
+///
+/// A pattern that does not compile is stored as `None`, which is where
+/// `Regex::new` would have failed and matched nothing, so a bad pattern is
+/// still matched exactly as before.
+fn compile_server_regexes(servers: &[DnsServer]) -> Vec<CompiledRegexes> {
+    servers
+        .iter()
+        .map(|server| {
+            server
+                .domains
+                .iter()
+                .map(|pattern| match pattern {
+                    DomainPattern::Regex(value) => Regex::new(value).ok(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Parse every DoH URL in `servers` once, keyed by the URL string.
+///
+/// `Url::parse` builds a whole URL structure: 260 ns for
+/// `https://dns.google/dns-query` against 0.3 ns for a borrow of the parsed
+/// form, paid on every DoH, DoH2 and DoH3 query before a byte went out.
+///
+/// A URL that does not parse is stored as the message the parse produced, so
+/// the error a query reports is unchanged.
+fn compile_doh_urls(servers: &[DnsServer]) -> HashMap<Arc<str>, Result<Url, String>> {
+    servers
+        .iter()
+        .filter_map(|server| match &server.endpoint {
+            ResolverEndpoint::Doh { url, .. }
+            | ResolverEndpoint::Doh2 { url, .. }
+            | ResolverEndpoint::Doh3 { url, .. } => {
+                Some((Arc::clone(url), Url::parse(url).map_err(|e| e.to_string())))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The order [`Resolver::candidates`] walks: every server index, domain-scoped
+/// ones first, catch-all ones last, each group in configured order.
+///
+/// Exactly the stable sort by `domains.is_empty()` that `candidates` used to
+/// run per lookup -- 162 ns for eight servers -- lifted to where it is
+/// computed once. `sort_by_key` is stable, so the order within each tier is
+/// the declared one.
+fn server_tiers(servers: &[DnsServer]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..servers.len()).collect();
+    order.sort_by_key(|index| servers[*index].domains.is_empty());
+    order
+}
+
 /// A resolver compiled from [`DnsSettings`]. Cloning it is cheap and safe for
 /// concurrent sessions; cache and in-flight state are shared.
 #[derive(Clone)]
@@ -346,6 +416,15 @@ pub struct Resolver {
     /// session (and per UDP datagram); building one used to mean four fresh
     /// rustls configurations and an empty cache every time.
     views: Arc<StdMutex<HashMap<Arc<str>, Resolver>>>,
+    /// Compiled once in [`Self::with_shared`]; see
+    /// [`Resolver::compile_server_regexes`].
+    regexes: Arc<Vec<CompiledRegexes>>,
+    /// Parsed once in [`Self::with_shared`]; see
+    /// [`Resolver::compile_doh_urls`].
+    doh_urls: Arc<HashMap<Arc<str>, Result<Url, String>>>,
+    /// Ordered once in [`Self::with_shared`]; see
+    /// [`Resolver::server_tiers`].
+    tiers: Arc<Vec<usize>>,
 }
 
 impl std::fmt::Debug for Resolver {
@@ -393,6 +472,9 @@ impl Resolver {
     }
 
     fn with_shared(settings: Arc<DnsSettings>, tls: Arc<TlsConfigs>, pools: Arc<Pools>) -> Self {
+        let regexes = Arc::new(compile_server_regexes(&settings.servers));
+        let doh_urls = Arc::new(compile_doh_urls(&settings.servers));
+        let tiers = Arc::new(server_tiers(&settings.servers));
         Self {
             settings,
             cache: Arc::new(StdMutex::new(HashMap::new())),
@@ -403,6 +485,9 @@ impl Resolver {
             tls,
             pools,
             views: Arc::new(StdMutex::new(HashMap::new())),
+            regexes,
+            doh_urls,
+            tiers,
         }
     }
 
@@ -1000,23 +1085,30 @@ impl Resolver {
     }
 
     fn candidates<'a>(&'a self, name: &str) -> Vec<&'a DnsServer> {
-        let mut candidates: Vec<_> = self
-            .settings
-            .servers
+        self.tiers
             .iter()
-            .filter(|server| {
+            .filter(|index| {
+                let server = &self.settings.servers[**index];
                 server.domains.is_empty()
                     || server
                         .domains
                         .iter()
-                        .any(|pattern| domain_matches(pattern, name))
+                        .enumerate()
+                        .any(|(position, pattern)| {
+                            // A `regexp:` pattern that compiled when this resolver was
+                            // built is matched against that automaton. It is the same
+                            // one `domain_matches` would compile from the same string,
+                            // so it answers identically -- it is simply already built.
+                            // Everything else, including a `regexp:` that does not
+                            // compile, goes to `domain_matches` unchanged.
+                            match self.regexes[**index][position].as_ref() {
+                                Some(regex) => regex.is_match(name),
+                                None => domain_matches(pattern, name),
+                            }
+                        })
             })
-            .collect();
-        // Domain-specific resolvers take precedence over the catch-all tier,
-        // regardless of their declaration order. Stable sorting preserves the
-        // configured order within each tier.
-        candidates.sort_by_key(|server| server.domains.is_empty());
-        candidates
+            .map(|index| &self.settings.servers[*index])
+            .collect()
     }
 
     async fn system_lookup(
@@ -1097,6 +1189,23 @@ impl Resolver {
         }
     }
 
+    /// The parsed form of a configured DoH URL.
+    ///
+    /// [`Resolver::doh_urls`] holds every DoH URL of the configuration, so this is
+    /// a hash lookup rather than a parse. The `Err` arm is the
+    /// [`ResolveError::Protocol`] a per-query `Url::parse` would have built,
+    /// carrying the message the parse produced.
+    fn doh_url(&self, url: &Arc<str>) -> Result<&Url, ResolveError> {
+        match self.doh_urls.get(url) {
+            Some(Ok(parsed)) => Ok(parsed),
+            Some(Err(message)) => Err(ResolveError::Protocol(message.clone())),
+            // Unreachable for a URL from `settings`: the map is built from exactly
+            // those. Treated as unparseable rather than panicking, which is what
+            // the per-query parse did with it.
+            None => Err(ResolveError::Protocol(format!("invalid DoH url: {url}"))),
+        }
+    }
+
     async fn query_endpoint(
         &self,
         endpoint: &ResolverEndpoint,
@@ -1123,24 +1232,24 @@ impl Resolver {
                     .await
             }
             ResolverEndpoint::Doh { url, host, port } => {
-                let parsed = Url::parse(url).map_err(|e| ResolveError::Protocol(e.to_string()))?;
+                let parsed = self.doh_url(url)?;
                 let address = Address::parse_host(host);
                 let addrs = self.endpoint_addrs(&address, *port).await?;
-                self.query_https(&addrs, host, &parsed, name, kind, false)
+                self.query_https(&addrs, host, parsed, name, kind, false)
                     .await
             }
             ResolverEndpoint::Doh2 { url, host, port } => {
-                let parsed = Url::parse(url).map_err(|e| ResolveError::Protocol(e.to_string()))?;
+                let parsed = self.doh_url(url)?;
                 let address = Address::parse_host(host);
                 let addrs = self.endpoint_addrs(&address, *port).await?;
-                self.query_https(&addrs, host, &parsed, name, kind, true)
+                self.query_https(&addrs, host, parsed, name, kind, true)
                     .await
             }
             ResolverEndpoint::Doh3 { url, host, port } => {
-                let parsed = Url::parse(url).map_err(|e| ResolveError::Protocol(e.to_string()))?;
+                let parsed = self.doh_url(url)?;
                 let address = Address::parse_host(host);
                 let addrs = self.endpoint_addrs(&address, *port).await?;
-                self.query_doh3(&addrs, host, &parsed, name, kind).await
+                self.query_doh3(&addrs, host, parsed, name, kind).await
             }
             ResolverEndpoint::Doq { address, port } => {
                 let addrs = self.endpoint_addrs(address, *port).await?;
@@ -1677,14 +1786,22 @@ fn parse_trust_anchor(blob: &[u8]) -> Vec<rustls_pki_types::CertificateDer<'stat
 }
 
 fn normalize_name(name: &str) -> Result<Arc<str>, ResolveError> {
-    let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+    let name = name.trim().trim_end_matches('.');
     if name.is_empty() {
         return Err(ResolveError::EmptyName);
     }
+    // `to_ascii_lowercase` preserves length, so this bound is the same either
+    // way round and can be checked before the copy is considered.
     if name.len() > MAX_NAME {
         return Err(ResolveError::NameTooLong);
     }
-    Ok(Arc::from(name))
+    // Names are nearly always already lowercase, and the result is an
+    // `Arc<str>` that allocates regardless, so skip the `String` when we can.
+    if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        Ok(Arc::from(name.to_ascii_lowercase()))
+    } else {
+        Ok(Arc::from(name))
+    }
 }
 
 fn filter_strategy(mut ips: Vec<IpAddr>, strategy: QueryStrategy) -> Vec<IpAddr> {
@@ -1696,11 +1813,52 @@ fn filter_strategy(mut ips: Vec<IpAddr>, strategy: QueryStrategy) -> Vec<IpAddr>
     ips
 }
 
+/// `value.trim().trim_end_matches('.').to_ascii_lowercase()`, borrowed when it
+/// already is. Patterns are matched per pattern per candidate server on every
+/// uncached query, so the `String` is worth avoiding.
+fn normalize_pattern(value: &str) -> Cow<'_, str> {
+    let value = value.trim().trim_end_matches('.');
+    if value.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(value.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
 fn domain_matches(pattern: &DomainPattern, name: &str) -> bool {
     match pattern {
-        DomainPattern::Full(value) => normalize_pattern(value) == name,
+        DomainPattern::Full(value) => normalize_pattern(value).as_ref() == name,
         DomainPattern::Suffix(value) => {
             let value = normalize_pattern(value);
+            // `name` is `value` with one more label in front of it, so the part
+            // before `value` has to end at a label boundary.
+            value.as_ref() == name
+                || name
+                    .strip_suffix(value.as_ref())
+                    .is_some_and(|head| head.ends_with('.'))
+        }
+        // `name` is already lowercase, so `normalize_pattern` borrows.
+        DomainPattern::Keyword(value) => name.contains(normalize_pattern(value).as_ref()),
+        DomainPattern::Regex(value) => Regex::new(value)
+            .map(|regex| regex.is_match(name))
+            .unwrap_or(false),
+        DomainPattern::Geosite(_) => false,
+    }
+}
+
+#[cfg(test)]
+fn normalize_pattern_allocating(value: &str) -> String {
+    value.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The allocating form of [`domain_matches`], kept as the definition the
+/// allocation-free one is checked against.
+#[cfg(test)]
+fn domain_matches_allocating(pattern: &DomainPattern, name: &str) -> bool {
+    match pattern {
+        DomainPattern::Full(value) => normalize_pattern_allocating(value) == name,
+        DomainPattern::Suffix(value) => {
+            let value = normalize_pattern_allocating(value);
             name == value || name.ends_with(&format!(".{value}"))
         }
         DomainPattern::Keyword(value) => name.contains(&value.to_ascii_lowercase()),
@@ -1711,8 +1869,99 @@ fn domain_matches(pattern: &DomainPattern, name: &str) -> bool {
     }
 }
 
-fn normalize_pattern(value: &str) -> String {
-    value.trim().trim_end_matches('.').to_ascii_lowercase()
+#[cfg(test)]
+mod domain_pattern_tests {
+    use super::{domain_matches, domain_matches_allocating, normalize_name, ResolveError};
+
+    fn pattern(value: &str) -> zero_config::routing::DomainPattern {
+        zero_config::routing::DomainPattern::parse(value)
+    }
+
+    /// The two forms must agree on every pattern kind, at every casing and
+    /// trailing-dot shape, against names as `candidates` passes them.
+    #[test]
+    fn the_allocation_free_matcher_agrees_with_the_allocating_one() {
+        let patterns = [
+            "full:example.com",
+            "full:Example.COM",
+            "full:example.com.",
+            "full:  example.com  ",
+            "full:ex",
+            "full:example.co",
+            "full:example.comm",
+            "domain:example.com",
+            "domain:Example.COM",
+            "domain:example.com.",
+            "domain:com",
+            "domain:ample.com",
+            "domain:example.co",
+            "keyword:tracker",
+            "keyword:Tracker",
+            "keyword:track",
+            "regexp:^ads[0-9]+\\.",
+            "regexp:[unclosed",
+            "geosite:category-ads-all",
+        ];
+        let names = [
+            "example.com",
+            "a.example.com",
+            "a.b.example.com",
+            "notexample.com",
+            "example.com.evil.net",
+            "ex",
+            "example.co",
+            "example.comm",
+            "com",
+            "ample.com",
+            "tracker.example",
+            "ads12.example",
+            "ad.example",
+        ];
+        for spec in patterns {
+            let parsed = pattern(spec);
+            for name in names {
+                assert_eq!(
+                    domain_matches(&parsed, name),
+                    domain_matches_allocating(&parsed, name),
+                    "{spec} against {name}"
+                );
+            }
+        }
+    }
+
+    /// `normalize_name` skips the lowercase copy when it can, so the
+    /// properties that copy provided are checked on their own.
+    #[test]
+    fn normalize_name_agrees_with_a_straight_lowercase() {
+        for input in [
+            "example.com",
+            "EXAMPLE.com",
+            "Example.Com",
+            "example.com.",
+            "  example.com  ",
+            "ExAmPlE.CoM.",
+            "a",
+            "xn--bcher-kva.example",
+        ] {
+            let want = input.trim().trim_end_matches('.').to_ascii_lowercase();
+            assert_eq!(
+                normalize_name(input).map(|got| got.to_string()),
+                Ok(want),
+                "{input:?}"
+            );
+        }
+        assert!(matches!(normalize_name(""), Err(ResolveError::EmptyName)));
+        assert!(matches!(
+            normalize_name("   "),
+            Err(ResolveError::EmptyName)
+        ));
+        assert!(matches!(normalize_name("."), Err(ResolveError::EmptyName)));
+        let long = "a".repeat(300);
+        assert!(matches!(
+            normalize_name(&long),
+            Err(ResolveError::NameTooLong)
+        ));
+    }
 }
 
 /// Reports a raced query's time when it finishes or is aborted.
@@ -3451,6 +3700,166 @@ mod tests {
     fn malformed_chunked_body_is_an_error_not_a_panic() {
         assert!(
             parse_http_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").is_err()
+        );
+    }
+
+    /// A resolver carrying `domains` on one endpoint, for the matching tests.
+    fn scoped(domains: &[&str], endpoint: &str) -> DnsServer {
+        DnsServer {
+            endpoint: ResolverEndpoint::parse(endpoint).unwrap(),
+            domains: domains
+                .iter()
+                .map(|pattern| zero_config::routing::DomainPattern::parse(pattern))
+                .collect(),
+            expect_ips: Vec::new(),
+            skip_fallback: false,
+            tag: None,
+        }
+    }
+
+    /// A precompiled `regexp:` has to select exactly the servers the
+    /// compile-per-match path did, including for a pattern that does not
+    /// compile -- which `compile_server_regexes` records as `None` so it still
+    /// reaches `domain_matches`.
+    #[test]
+    fn precompiled_regexps_match_exactly_as_compiling_at_match_time() {
+        let server = scoped(
+            &[
+                "regexp:^ads[0-9]+\\.",
+                "regexp:^([a-z0-9-]+\\.)*example\\.com$",
+                "regexp:[unclosed",
+                "domain:plain.example",
+            ],
+            "1.1.1.1",
+        );
+        let compiled = compile_server_regexes(std::slice::from_ref(&server));
+        for (position, pattern) in server.domains.iter().enumerate() {
+            for name in [
+                "ads12.example",
+                "ads.example",
+                "example.com",
+                "a.b.example.com",
+                "notexample.com",
+                "plain.example",
+            ] {
+                // What the previous implementation did: compile, then match.
+                let want = domain_matches(pattern, name);
+                let got = match compiled[0][position].as_ref() {
+                    Some(regex) => regex.is_match(name),
+                    None => domain_matches(pattern, name),
+                };
+                assert_eq!(got, want, "domain {position} against {name}");
+            }
+        }
+    }
+
+    /// `candidates` must produce the sequence the old per-lookup stable sort
+    /// produced, for every mix of scoped and catch-all servers.
+    #[test]
+    fn candidate_order_is_what_the_per_lookup_sort_produced() {
+        let mixes: Vec<Vec<DnsServer>> = vec![
+            vec![scoped(&[], "1.1.1.1"), scoped(&[], "8.8.8.8")],
+            vec![
+                scoped(&["domain:d0.example"], "1.1.1.1"),
+                scoped(&["domain:d1.example"], "8.8.8.8"),
+            ],
+            // interleaved, the case the ordering exists for
+            vec![
+                scoped(&[], "1.1.1.1"),
+                scoped(&["domain:ir"], "8.8.8.8"),
+                scoped(&[], "9.9.9.9"),
+                scoped(&["domain:example.com"], "1.0.0.1"),
+                scoped(&[], "8.8.4.4"),
+            ],
+            vec![
+                scoped(&[], "1.1.1.1"),
+                scoped(&["regexp:^ads[0-9]+\\."], "8.8.8.8"),
+                scoped(&["regexp:[unclosed"], "9.9.9.9"),
+                scoped(&["keyword:tracker"], "1.0.0.1"),
+            ],
+        ];
+        for servers in mixes {
+            let resolver = Resolver::new(DnsSettings {
+                servers: servers.clone().into_boxed_slice(),
+                ..DnsSettings::default()
+            });
+            for name in [
+                "example.com",
+                "d1.example",
+                "ads12.ads",
+                "x.tracker.example",
+                "unrelated.test",
+            ] {
+                // What the previous implementation computed: filter in
+                // declaration order, then stable-sort by is_empty.
+                let mut expected: Vec<DnsServer> = servers
+                    .iter()
+                    .filter(|server| {
+                        server.domains.is_empty()
+                            || server
+                                .domains
+                                .iter()
+                                .any(|pattern| domain_matches(pattern, name))
+                    })
+                    .cloned()
+                    .collect();
+                expected.sort_by_key(|server| server.domains.is_empty());
+
+                let got: Vec<String> = resolver
+                    .candidates(name)
+                    .into_iter()
+                    .map(|server| server.endpoint.host())
+                    .collect();
+                let want: Vec<String> = expected
+                    .iter()
+                    .map(|server| server.endpoint.host())
+                    .collect();
+                assert_eq!(got, want, "candidate order for {name}");
+            }
+        }
+    }
+
+    /// A DoH URL must report what the per-query parse reported, bad URLs included.
+    #[test]
+    fn doh_urls_are_parsed_once_and_failures_are_preserved() {
+        let doh = |url: &str| DnsServer {
+            endpoint: ResolverEndpoint::Doh {
+                url: url.into(),
+                host: "dns.example".into(),
+                port: 443,
+            },
+            domains: Vec::new(),
+            expect_ips: Vec::new(),
+            skip_fallback: false,
+            tag: None,
+        };
+        let resolver = Resolver::new(DnsSettings {
+            servers: vec![
+                doh("https://dns.example/dns-query"),
+                doh("https://other.example/dns-query"),
+                doh("not a url"),
+            ]
+            .into_boxed_slice(),
+            ..DnsSettings::default()
+        });
+
+        for url in [
+            "https://dns.example/dns-query",
+            "https://other.example/dns-query",
+        ] {
+            // Exactly what the per-query parse returned.
+            assert_eq!(
+                resolver.doh_url(&url.into()).map(|u| u.to_string()),
+                Ok(url.to_string()),
+                "{url}"
+            );
+        }
+        let bad = "not a url";
+        assert_eq!(
+            resolver.doh_url(&bad.into()).map(|u| u.to_string()),
+            Url::parse(bad)
+                .map(|u| u.to_string())
+                .map_err(|e| ResolveError::Protocol(e.to_string()))
         );
     }
 }

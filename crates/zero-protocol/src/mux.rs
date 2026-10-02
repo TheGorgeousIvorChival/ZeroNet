@@ -5,6 +5,10 @@
 //! deliberately independent from pooling: callers may use one worker for one
 //! logical stream first, and add a session manager without changing these
 //! bytes.
+//!
+//! Neither read nor write goes through a scratch buffer: a payload is read
+//! into its own spare capacity, and a chunk is read straight into the frame
+//! that will carry it. `bench/hotpath` counts what that saves.
 
 use std::collections::HashMap;
 use std::io;
@@ -363,8 +367,31 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Fram
     let mut frame = decode_metadata(&metadata[..metadata_len])?;
     if frame.option & OPTION_DATA != 0 {
         let payload_len = reader.read_u16().await? as usize;
-        let mut payload = vec![0u8; payload_len];
-        reader.read_exact(&mut payload).await?;
+        // `vec![0u8; payload_len]` zeroes up to 64 KiB that the read then
+        // overwrites, on every frame. Filling the spare capacity instead skips
+        // that. The loop keeps `read_exact` semantics, since one read may
+        // under-fill, and each pass is capped at the announced length so a
+        // read cannot run into the next frame's bytes.
+        let mut payload = Vec::with_capacity(payload_len);
+        let mut filled = 0;
+        while filled < payload_len {
+            // `spare_capacity_mut` is at least `payload_len - filled` long
+            // because `capacity >= payload_len` and the length is `filled`.
+            let spare = &mut payload.spare_capacity_mut()[..payload_len - filled];
+            let mut read = tokio::io::ReadBuf::uninit(spare);
+            reader.read_buf(&mut read).await?;
+            let n = read.filled().len();
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "mux payload ended early",
+                ));
+            }
+            filled += n;
+            // SAFETY: the read above initialized exactly `n` bytes past the old
+            // length, and `filled <= payload_len <= capacity`.
+            unsafe { payload.set_len(filled) };
+        }
         frame.payload = payload;
     }
     Ok(frame)
@@ -647,10 +674,13 @@ impl ClientPool {
         let state = self.state.clone();
         tokio::spawn(async move {
             let mut first = true;
-            let mut buf = vec![0u8; 16 * 1024];
+            // Read straight into the frame's buffer. `Frame::keep(..,
+            // buf[..n].to_vec())` paid an allocation *and* a full copy for a
+            // frame the carrier writer encodes and drops immediately.
             let result = async {
                 loop {
-                    let n = local_read.read(&mut buf).await?;
+                    let mut payload = Vec::with_capacity(16 * 1024);
+                    let n = local_read.read_buf(&mut payload).await?;
                     if n == 0 {
                         state
                             .frames
@@ -663,9 +693,9 @@ impl ClientPool {
                     }
                     let frame = if first {
                         first = false;
-                        Frame::new(session_id, destination.clone(), buf[..n].to_vec())
+                        Frame::new(session_id, destination.clone(), payload)
                     } else {
-                        Frame::keep(session_id, buf[..n].to_vec())
+                        Frame::keep(session_id, payload)
                     };
                     state.frames.send(frame).await.map_err(|_| {
                         io::Error::new(io::ErrorKind::BrokenPipe, "mux writer closed")
@@ -831,10 +861,32 @@ where
         }
     };
     let downlink = async {
-        let mut buf = vec![0u8; 16 * 1024];
+        // Read straight into the frame's payload. Copying each chunk into a
+        // `Frame::keep(.., buf[..n].to_vec())` first cost an allocation and a
+        // full copy of every chunk, for a frame that is encoded into `out` and
+        // dropped on the next line.
+        //
+        // The fields are set here rather than through `Frame::keep`, which
+        // derives `OPTION_DATA` from whether the payload was empty when it was
+        // called. This frame is reused, so that has to be stated once: the
+        // empty case is handled by `Frame::end` below, so this frame is only
+        // ever encoded with a non-empty payload.
+        let mut frame = Frame {
+            session_id,
+            status: STATUS_KEEP,
+            option: OPTION_DATA,
+            target: None,
+            global_id: None,
+            payload: Vec::new(),
+        };
         let mut out = Vec::with_capacity(16 * 1024 + 16);
         loop {
-            let n = remote_read.read(&mut buf).await?;
+            // `reserve` then `read_buf` reads into the payload's own spare
+            // capacity, so no 16 KiB of zeros is written per chunk and no copy
+            // out of a scratch buffer is needed either.
+            frame.payload.clear();
+            frame.payload.reserve(16 * 1024);
+            let n = remote_read.read_buf(&mut frame.payload).await?;
             out.clear();
             if n == 0 {
                 encode_frame_into(&Frame::end(session_id, false), &mut out)?;
@@ -842,7 +894,7 @@ where
                 outer_write.shutdown().await?;
                 return Ok::<(), io::Error>(());
             }
-            encode_frame_into(&Frame::keep(session_id, buf[..n].to_vec()), &mut out)?;
+            encode_frame_into(&frame, &mut out)?;
             outer_write.write_all(&out).await?;
             outer_write.flush().await?;
         }
@@ -1051,14 +1103,16 @@ where
             Ok::<(), io::Error>(())
         };
         let downlink = async {
-            let mut buffer = vec![0u8; 16 * 1024];
             loop {
-                let size = match remote_read.read(&mut buffer).await {
+                // Read straight into the frame's buffer rather than into a
+                // scratch buffer copied out with `buffer[..size].to_vec()`.
+                let mut payload = Vec::with_capacity(16 * 1024);
+                match remote_read.read_buf(&mut payload).await {
                     Ok(0) | Err(_) => break,
-                    Ok(size) => size,
-                };
+                    Ok(_) => {}
+                }
                 if frame_tx
-                    .send(Frame::keep(session_id, buffer[..size].to_vec()))
+                    .send(Frame::keep(session_id, payload))
                     .await
                     .is_err()
                 {
@@ -1258,6 +1312,53 @@ mod tests {
         assert_eq!(&first_response, b"first");
         assert_eq!(&second_response, b"second");
         server.await.unwrap();
+    }
+
+    /// The server-side relay's downlink reuses one `Frame` across chunks.
+    /// `Frame::keep` derives `OPTION_DATA` from the payload being empty when it
+    /// is called, so a relay that builds the frame once and fills it per chunk
+    /// must state the option itself -- otherwise every chunk is encoded as
+    /// metadata with no data and the reply silently arrives empty.
+    ///
+    /// This is the only test that drives `relay_server` at all, and the payload
+    /// is deliberately longer than one chunk so the reuse is exercised more
+    /// than once, and not a multiple of the chunk size so the last one is short.
+    #[tokio::test]
+    async fn a_relayed_reply_keeps_its_payload_across_several_chunks() {
+        let (mut client, carrier) = tokio::io::duplex(256 * 1024);
+        let (remote, mut peer) = tokio::io::duplex(256 * 1024);
+        let first = Frame::new(1, destination(), Vec::new());
+        let relay = tokio::spawn(relay_server(
+            zero_core::boxed(carrier),
+            first,
+            zero_core::boxed(remote),
+        ));
+
+        let payload: Vec<u8> = (0..(16 * 1024 * 2 + 517))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let expected = payload.clone();
+        tokio::spawn(async move {
+            peer.write_all(&payload).await.unwrap();
+        });
+
+        let mut got: Vec<u8> = Vec::new();
+        let mut chunks = 0;
+        while got.len() < expected.len() {
+            let frame = read_frame(&mut client).await.unwrap();
+            assert_eq!((frame.session_id, frame.status), (1, STATUS_KEEP));
+            assert_ne!(
+                frame.option & OPTION_DATA,
+                0,
+                "a data chunk must carry OPTION_DATA, or the payload is dropped"
+            );
+            got.extend_from_slice(&frame.payload);
+            chunks += 1;
+            assert!(chunks <= 8, "relay is not making progress");
+        }
+        assert_eq!(got, expected, "the relayed reply was not byte-identical");
+        drop(client);
+        relay.await.unwrap().unwrap();
     }
 
     /// Regression: the server pool awaited `route()` inside the carrier read

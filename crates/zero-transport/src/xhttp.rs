@@ -368,16 +368,25 @@ pub async fn accept_packet_up(
             .ok_or_else(|| "XHTTP packet-up GET has no valid session path".to_string())?;
         let (app, worker) = tokio::io::duplex(64 * 1024);
         let packet_rx = hub.open(session.clone()).await?;
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\n\r\n",
-            )
-            .await
-            .map_err(|error| format!("XHTTP packet download response: {error}"))?;
-        stream
-            .flush()
-            .await
-            .map_err(|error| format!("XHTTP packet download flush: {error}"))?;
+        // Only the task below removes the session, so a response that never
+        // lands has to drop it here.
+        let response = async {
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .map_err(|error| format!("XHTTP packet download response: {error}"))?;
+            stream
+                .flush()
+                .await
+                .map_err(|error| format!("XHTTP packet download flush: {error}"))
+        }
+        .await;
+        if let Err(error) = response {
+            hub.sessions.lock().await.remove(&session);
+            return Err(error);
+        }
         let hub = Arc::clone(hub);
         tokio::spawn(async move {
             run_packet_server_exchange(packet_rx, worker, stream).await;
@@ -1832,15 +1841,23 @@ pub async fn accept_packet_up_h3(
             return Err("XHTTP HTTP/3 packet GET must not have a request body".into());
         }
         let packet_rx = hub.open(session.clone()).await?;
-        let response = http::Response::builder()
-            .status(http::StatusCode::OK)
-            .header("content-type", "application/octet-stream")
-            .body(())
-            .map_err(|error| format!("XHTTP HTTP/3 packet download response: {error}"))?;
-        stream
-            .send_response(response)
-            .await
-            .map_err(|error| format!("XHTTP HTTP/3 packet download response: {error}"))?;
+        // As in the HTTP/1.1 leg above.
+        let response = async {
+            let response = http::Response::builder()
+                .status(http::StatusCode::OK)
+                .header("content-type", "application/octet-stream")
+                .body(())
+                .map_err(|error| format!("XHTTP HTTP/3 packet download response: {error}"))?;
+            stream
+                .send_response(response)
+                .await
+                .map_err(|error| format!("XHTTP HTTP/3 packet download response: {error}"))
+        }
+        .await;
+        if let Err(error) = response {
+            hub.sessions.lock().await.remove(&session);
+            return Err(error);
+        }
         let (mut send, mut recv) = stream.split();
         let (app, worker) = tokio::io::duplex(128 * 1024);
         let hub = Arc::clone(hub);
@@ -2413,6 +2430,76 @@ const CHUNK_PAYLOAD: usize = 16 * 1024;
 /// Room in front of the payload for the hex size line (16 digits + CRLF).
 const CHUNK_HEAD_ROOM: usize = 18;
 
+#[cfg(test)]
+mod chunk_head_tests {
+    use super::{chunk_head, CHUNK_HEAD_ROOM, CHUNK_PAYLOAD};
+
+    /// Reproduce the one production caller: it copies the last `len` bytes of
+    /// `out` to the right edge of a `CHUNK_HEAD_ROOM` head. Asserting the
+    /// function against itself is what let an offset-for-length mix-up
+    /// through, since a test that read `out[len..]` agreed with a `len` that
+    /// was really an offset.
+    fn emitted_by_caller(n: usize) -> Vec<u8> {
+        let mut head = [0u8; 6];
+        let len = chunk_head(n, &mut head);
+        assert!(
+            len <= CHUNK_HEAD_ROOM,
+            "n {n}: length {len} exceeds the head room"
+        );
+        assert!(len <= head.len(), "n {n}: length {len} exceeds the buffer");
+        let start = CHUNK_HEAD_ROOM - len;
+        let mut frame = [0u8; CHUNK_HEAD_ROOM];
+        frame[start..CHUNK_HEAD_ROOM].copy_from_slice(&head[head.len() - len..]);
+        // The head is left-padded, so the line is the rightmost `len` bytes.
+        frame[start..].to_vec()
+    }
+
+    /// The bytes must be exactly what `format!("{n:X}\r\n")` produces, for
+    /// every chunk size the uploader can produce.
+    #[test]
+    fn writes_exactly_what_format_would() {
+        for n in 1..=CHUNK_PAYLOAD {
+            let want = format!("{n:X}\r\n");
+            assert_eq!(
+                emitted_by_caller(n),
+                want.as_bytes(),
+                "n {n} (want {want:?})"
+            );
+        }
+    }
+
+    /// One to four hex digits all occur, so every alignment is covered. The
+    /// bug lived in the two-and-three-digit cases.
+    #[test]
+    fn every_hex_width_is_exercised() {
+        let widths: std::collections::BTreeSet<usize> = (1..=CHUNK_PAYLOAD)
+            .map(|n| format!("{n:X}").len())
+            .collect();
+        assert_eq!(widths, [1, 2, 3, 4].into_iter().collect());
+    }
+}
+
+/// Write the chunked-encoding size line for `n` bytes into `out` (six bytes,
+/// right-aligned) and return its length: the bytes `format!("{n:X}\r\n")`
+/// produces, without a `String` and the formatting machinery behind it. `n` is
+/// non-zero and at most [`CHUNK_PAYLOAD`], so the line is at most four hex
+/// digits plus CRLF.
+fn chunk_head(n: usize, out: &mut [u8; 6]) -> usize {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    debug_assert!(n > 0 && n <= CHUNK_PAYLOAD);
+    // `n != 0`, so 1..=4.
+    let digits = ((usize::BITS - n.leading_zeros()) as usize).div_ceil(4);
+    let start = out.len() - (digits + 2);
+    for j in 0..digits {
+        out[start + j] = HEX[(n >> (4 * (digits - 1 - j))) & 0xf];
+    }
+    out[out.len() - 2] = b'\r';
+    out[out.len() - 1] = b'\n';
+    // The caller sizes its copy from this, so it is the length of the line
+    // and not the offset it starts at — the two agree only for one digit.
+    digits + 2
+}
+
 /// Decode an HTTP/1.1 chunked body from `net` into `app`, up to and including
 /// the terminating zero-size chunk.
 ///
@@ -2491,9 +2578,11 @@ where
                 .await
                 .map_err(|error| format!("XHTTP {what} flush: {error}"));
         }
-        let head = format!("{n:X}\r\n");
-        let start = CHUNK_HEAD_ROOM - head.len();
-        frame[start..CHUNK_HEAD_ROOM].copy_from_slice(head.as_bytes());
+        // Once per 16 KiB chunk of every XHTTP upload and download.
+        let mut head = [0u8; 6];
+        let head_len = chunk_head(n, &mut head);
+        let start = CHUNK_HEAD_ROOM - head_len;
+        frame[start..CHUNK_HEAD_ROOM].copy_from_slice(&head[6 - head_len..]);
         let end = CHUNK_HEAD_ROOM + n;
         frame[end..end + 2].copy_from_slice(b"\r\n");
         net.write_all(&frame[start..end + 2])
@@ -2793,6 +2882,32 @@ mod tests {
             .deliver("session", 1, b"duplicate".to_vec())
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_hangs_up_mid_handshake_registers_no_session() {
+        // The session id comes off the request target and nothing reaps the
+        // map, so a failed handshake must not leave one resident.
+        let (mut client, server) = tokio::io::duplex(16 * 1024);
+        let config = WsConfig::new("/packet", "edge.example");
+        let hub = Arc::new(PacketHub::new());
+        let server_config = config.clone();
+        let server_hub = Arc::clone(&hub);
+        let server_task = tokio::spawn(async move {
+            accept_packet_up(zero_core::boxed(server), &server_config, &server_hub).await
+        });
+
+        client
+            .write_all(b"GET /packet/abandoned HTTP/1.1\r\nHost: edge.example\r\n\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        drop(client);
+        assert!(server_task.await.unwrap().is_err());
+        assert!(
+            hub.sessions.lock().await.is_empty(),
+            "a failed download handshake must not leave a session behind"
+        );
     }
 
     #[tokio::test]

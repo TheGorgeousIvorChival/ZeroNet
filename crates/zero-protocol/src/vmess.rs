@@ -142,6 +142,14 @@ impl FrameCipher {
         nonce
     }
 
+    /// Refuses to wrap: a repeated nonce under a fixed key breaks the AEAD.
+    fn advance(counter: &mut u16) -> io::Result<()> {
+        *counter = counter
+            .checked_add(1)
+            .ok_or_else(|| invalid("VMess AEAD nonce counter exhausted"))?;
+        Ok(())
+    }
+
     fn overhead(&self) -> usize {
         match self {
             Self::None { .. } => 0,
@@ -156,6 +164,7 @@ impl FrameCipher {
         match self {
             Self::None { counter } => {
                 *counter = counter.wrapping_add(1);
+                Ok(())
             }
             Self::Aes {
                 cipher,
@@ -171,7 +180,7 @@ impl FrameCipher {
                     )
                     .map_err(|_| invalid("VMess data encryption failed"))?;
                 out.extend_from_slice(&tag);
-                *counter = counter.wrapping_add(1);
+                Self::advance(counter)
             }
             Self::Chacha {
                 cipher,
@@ -187,10 +196,9 @@ impl FrameCipher {
                     )
                     .map_err(|_| invalid("VMess data encryption failed"))?;
                 out.extend_from_slice(&tag);
-                *counter = counter.wrapping_add(1);
+                Self::advance(counter)
             }
         }
-        Ok(())
     }
 
     /// Authenticate and decrypt `chunk` in place, returning the plaintext
@@ -221,7 +229,7 @@ impl FrameCipher {
                         tag.into(),
                     )
                     .map_err(|_| invalid("VMess data authentication failed"))?;
-                *counter = counter.wrapping_add(1);
+                Self::advance(counter)?;
                 Ok(split)
             }
             Self::Chacha {
@@ -244,7 +252,7 @@ impl FrameCipher {
                         tag.into(),
                     )
                     .map_err(|_| invalid("VMess data authentication failed"))?;
-                *counter = counter.wrapping_add(1);
+                Self::advance(counter)?;
                 Ok(split)
             }
         }
@@ -673,21 +681,64 @@ fn aes_ecb(key: &[u8; 16], block: &mut [u8; 16], encrypt: bool) -> io::Result<()
     Ok(())
 }
 
+/// The eight tables of a slice-by-8 CRC-32. `T[0]` is the ordinary byte table
+/// and `T[k][i]` is `T[0][i]` advanced `k` byte steps. The CRC is linear over
+/// GF(2), so the eight bytes at the front of the register decompose into eight
+/// contributions these tables fold in one step: eight lookups and seven xors
+/// per eight bytes, not eight xors and sixty-four conditional shifts.
+const fn crc32_tables() -> [[u32; 256]; 8] {
+    let mut t = [[0u32; 256]; 8];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 == 1 {
+                (c >> 1) ^ 0xedb8_8320
+            } else {
+                c >> 1
+            };
+            k += 1;
+        }
+        t[0][i] = c;
+        i += 1;
+    }
+    let mut k = 1;
+    while k < 8 {
+        let mut i = 0;
+        while i < 256 {
+            let c = t[k - 1][i];
+            t[k][i] = t[0][(c & 0xff) as usize] ^ (c >> 8);
+            i += 1;
+        }
+        k += 1;
+    }
+    t
+}
+
+static CRC32_TABLES: [[u32; 256]; 8] = crc32_tables();
+
+/// CRC-32 (IEEE, reflected, polynomial `0xedb88320`), pre- and post-inverted.
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ 0xedb8_8320
-            } else {
-                crc >> 1
-            };
-        }
+    let (groups, rest) = data.as_chunks::<8>();
+    for chunk in groups {
+        let lo = u32::from_le_bytes(chunk[..4].try_into().unwrap()) ^ crc;
+        let hi = u32::from_le_bytes(chunk[4..].try_into().unwrap());
+        crc = CRC32_TABLES[7][(lo & 0xff) as usize]
+            ^ CRC32_TABLES[6][((lo >> 8) & 0xff) as usize]
+            ^ CRC32_TABLES[5][((lo >> 16) & 0xff) as usize]
+            ^ CRC32_TABLES[4][((lo >> 24) & 0xff) as usize]
+            ^ CRC32_TABLES[3][(hi & 0xff) as usize]
+            ^ CRC32_TABLES[2][((hi >> 8) & 0xff) as usize]
+            ^ CRC32_TABLES[1][((hi >> 16) & 0xff) as usize]
+            ^ CRC32_TABLES[0][((hi >> 24) & 0xff) as usize];
+    }
+    for byte in rest {
+        crc = (crc >> 8) ^ CRC32_TABLES[0][((crc ^ u32::from(*byte)) & 0xff) as usize];
     }
     !crc
 }
-
 fn fnv1a(data: &[u8]) -> u32 {
     let mut hash = 0x811c_9dc5u32;
     for byte in data {
@@ -765,7 +816,7 @@ fn response_prefix(
     Ok(out)
 }
 
-fn make_auth_id(uuid: &[u8; 16]) -> io::Result<[u8; 16]> {
+fn make_auth_id(instruction: &[u8; 16]) -> io::Result<[u8; 16]> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| io::Error::other("system clock is before UNIX epoch"))?
@@ -775,15 +826,15 @@ fn make_auth_id(uuid: &[u8; 16]) -> io::Result<[u8; 16]> {
     rand::thread_rng().fill_bytes(&mut plain[8..12]);
     let checksum = crc32(&plain[..12]).to_be_bytes();
     plain[12..].copy_from_slice(&checksum);
-    let key: [u8; 16] = kdf(&instruction_key(uuid), &[b"AES Auth ID Encryption"])[..16]
+    let key: [u8; 16] = kdf(instruction, &[b"AES Auth ID Encryption"])[..16]
         .try_into()
         .unwrap();
     aes_ecb(&key, &mut plain, true)?;
     Ok(plain)
 }
 
-fn valid_auth_id(uuid: &[u8; 16], auth_id: &[u8; 16]) -> io::Result<bool> {
-    let key: [u8; 16] = kdf(&instruction_key(uuid), &[b"AES Auth ID Encryption"])[..16]
+fn valid_auth_id(instruction: &[u8; 16], auth_id: &[u8; 16]) -> io::Result<bool> {
+    let key: [u8; 16] = kdf(instruction, &[b"AES Auth ID Encryption"])[..16]
         .try_into()
         .unwrap();
     let mut plain = *auth_id;
@@ -883,7 +934,10 @@ fn request_header(
     cipher: Cipher,
     destination: &Destination,
 ) -> io::Result<RequestMaterial> {
-    let auth_id = make_auth_id(uuid)?;
+    // Every key below comes from the instruction key, which used to be
+    // recomputed for each of the five.
+    let instruction = instruction_key(uuid);
+    let auth_id = make_auth_id(&instruction)?;
     let mut clear = Vec::with_capacity(320);
     clear.push(1);
     let mut data_iv = [0u8; 16];
@@ -923,13 +977,13 @@ fn request_header(
     let mut nonce = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut nonce);
     let header_len_key: [u8; 16] = kdf(
-        &instruction_key(uuid),
+        &instruction,
         &[b"VMess Header AEAD Key_Length", &auth_id, &nonce],
     )[..16]
         .try_into()
         .unwrap();
     let header_len_nonce: [u8; 12] = kdf(
-        &instruction_key(uuid),
+        &instruction,
         &[b"VMess Header AEAD Nonce_Length", &auth_id, &nonce],
     )[..12]
         .try_into()
@@ -940,14 +994,12 @@ fn request_header(
         &(clear.len() as u16).to_be_bytes(),
         &auth_id,
     )?;
-    let header_key: [u8; 16] = kdf(
-        &instruction_key(uuid),
-        &[b"VMess Header AEAD Key", &auth_id, &nonce],
-    )[..16]
+    let header_key: [u8; 16] = kdf(&instruction, &[b"VMess Header AEAD Key", &auth_id, &nonce])
+        [..16]
         .try_into()
         .unwrap();
     let header_nonce: [u8; 12] = kdf(
-        &instruction_key(uuid),
+        &instruction,
         &[b"VMess Header AEAD Nonce", &auth_id, &nonce],
     )[..12]
         .try_into()
@@ -1005,10 +1057,17 @@ where
 {
     let mut auth_id = [0u8; AUTH_ID_LEN];
     tokio::io::AsyncReadExt::read_exact(&mut inner, &mut auth_id).await?;
+    // Derived once per candidate, and the matching one carried forward.
     let user = users
         .iter()
-        .find(|user| valid_auth_id(&user.uuid, &auth_id).unwrap_or(false))
+        .find_map(|user| {
+            let instruction = instruction_key(&user.uuid);
+            valid_auth_id(&instruction, &auth_id)
+                .unwrap_or(false)
+                .then_some((user, instruction))
+        })
         .ok_or_else(|| invalid("VMess authentication id is invalid or expired"))?;
+    let (user, instruction) = user;
     // Xray keeps every accepted auth ID for its 120-second validity window
     // and rejects repeats; without that, a captured request replays verbatim.
     if !AUTH_IDS.check_and_insert(&auth_id) {
@@ -1019,7 +1078,6 @@ where
     tokio::io::AsyncReadExt::read_exact(&mut inner, &mut encrypted_len).await?;
     let mut nonce = [0u8; 8];
     tokio::io::AsyncReadExt::read_exact(&mut inner, &mut nonce).await?;
-    let instruction = instruction_key(&user.uuid);
     let len_key: [u8; 16] = kdf(
         &instruction,
         &[b"VMess Header AEAD Key_Length", &auth_id, &nonce],
@@ -1288,6 +1346,55 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// The bit-at-a-time definition, kept so the table-driven form is checked
+    /// against the algorithm rather than a remembered constant.
+    fn crc32_bitwise(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn crc32_matches_the_bit_at_a_time_definition_at_every_alignment() {
+        // Lengths below 24 cover every way a tail can land against the 8-byte
+        // step: no whole step, one, and two with a remainder.
+        let mut data = Vec::new();
+        for len in 0..24usize {
+            data.clear();
+            for i in 0..len {
+                data.push((i as u8).wrapping_mul(37).wrapping_add(11));
+            }
+            assert_eq!(crc32(&data), crc32_bitwise(&data), "len {len}");
+        }
+        // Longer inputs, and all-zeroes/all-ones, the shapes a single
+        // repeated table lookup would get wrong.
+        for len in [31usize, 32, 63, 64, 65, 127, 128, 1000, 4096, 8191] {
+            for fill in [0x00u8, 0xff, 0x5a] {
+                data.clear();
+                data.resize(len, fill);
+                assert_eq!(
+                    crc32(&data),
+                    crc32_bitwise(&data),
+                    "len {len} fill {fill:#x}"
+                );
+            }
+        }
+        // Every single-byte input, and the empty string.
+        for byte in 0u8..=255 {
+            assert_eq!(crc32(&[byte]), crc32_bitwise(&[byte]), "byte {byte}");
+        }
+        assert_eq!(crc32(b""), 0);
+    }
+
     fn uuid() -> [u8; 16] {
         [
             0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
@@ -1463,5 +1570,40 @@ mod tests {
         assert_eq!(kdf(&key, &[b"one"]), kdf(&key, &[b"one"]));
         assert_ne!(kdf(&key, &[b"one"]), kdf(&key, &[b"two"]));
         assert_ne!(crc32(b"hello"), 0);
+    }
+
+    #[test]
+    fn an_exhausted_frame_counter_refuses_to_reuse_a_nonce() {
+        for cipher in [Cipher::Aes128Gcm, Cipher::Chacha20Poly1305] {
+            let mut sender = FrameCipher::new(cipher, &[7u8; 16], &[9u8; 16]);
+            let mut receiver = FrameCipher::new(cipher, &[7u8; 16], &[9u8; 16]);
+            // Wind both to the last counter the 16-bit field names.
+            for _ in 0..u16::MAX - 1 {
+                FrameCipher::advance(counter_of(&mut sender)).unwrap();
+                FrameCipher::advance(counter_of(&mut receiver)).unwrap();
+            }
+
+            // The last frame the counter can name still round-trips.
+            let mut frame = Vec::new();
+            sender.seal_into(b"last frame", &mut frame).unwrap();
+            let opened = receiver.open_in_place(&mut frame).unwrap();
+            assert_eq!(&frame[..opened], b"last frame");
+
+            // The one after it would reuse a nonce, so neither end accepts it.
+            let mut reused = Vec::new();
+            let error = sender
+                .seal_into(b"reused", &mut reused)
+                .expect_err("a wrapped counter must not seal");
+            assert_eq!(error.to_string(), "VMess AEAD nonce counter exhausted");
+            receiver.open_in_place(&mut reused).unwrap_err();
+        }
+
+        fn counter_of(cipher: &mut FrameCipher) -> &mut u16 {
+            match cipher {
+                FrameCipher::None { counter }
+                | FrameCipher::Aes { counter, .. }
+                | FrameCipher::Chacha { counter, .. } => counter,
+            }
+        }
     }
 }
