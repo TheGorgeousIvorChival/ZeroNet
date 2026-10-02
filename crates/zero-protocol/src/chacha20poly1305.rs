@@ -149,7 +149,7 @@ mod tests {
             .encrypt_in_place_detached(&nonce, &aad, &mut sealed)
             .unwrap();
         assert_eq!(sealed, expected);
-        assert_eq!(tag, expected_tag);
+        assert_eq!(tag.as_slice(), expected_tag.as_slice());
 
         let mut opened = sealed.clone();
         cipher
