@@ -462,7 +462,17 @@ def _xray_transport(
         else:
             reality["publicKey"] = identity.reality_public
             reality["shortId"] = identity.reality_short_id
-            if link.mldsa and identity.mldsa_verify:
+            if link.mldsa:
+                # Dropping this field would leave a scenario named
+                # `...-mldsa65-...` measuring a plain REALITY handshake, which is
+                # the report asserting a measurement it did not take. If the key
+                # is not there, the row cannot be built as named.
+                if not identity.mldsa_verify:
+                    raise UnsupportedShape(
+                        "this scenario is ML-DSA-65 REALITY and the fixture has no "
+                        "ML-DSA-65 key, so generating it would produce a plain "
+                        "REALITY row under an ML-DSA name"
+                    )
                 reality["mldsa65Verify"] = identity.mldsa_verify
         settings["realitySettings"] = reality
     return settings
@@ -702,6 +712,11 @@ def _singbox_tls(
             tls["certificate_path"] = str(identity.path("cert.pem"))
             tls["key_path"] = str(identity.path("key.pem"))
         else:
+            if link.mldsa:
+                raise UnsupportedShape(
+                    "sing-box's REALITY options have no ML-DSA-65 field, so this "
+                    "scenario cannot be generated as named for it"
+                )
             reality: dict = {
                 "enabled": True,
                 "private_key": identity.reality_private,
@@ -715,12 +730,21 @@ def _singbox_tls(
         return tls
     tls = {"enabled": True, "server_name": SNI, "alpn": _alpn(link)}
     tls["utls"] = {"enabled": True, "fingerprint": "chrome"}
-    if link.security == "tls":
+    # `security`, not `link.security`: a QUIC protocol rewrites the first to
+    # "tls" above, and testing the original sent a Hysteria 2 outbound down the
+    # REALITY branch -- a REALITY block and a uTLS fingerprint on a protocol that
+    # uses neither, and no `insecure`, which is the flag it actually needs.
+    if security == "tls":
         # sing-box has no way to hand a client a private CA, so the fixture
         # certificate is trusted explicitly. The report says so, because it makes
         # the TLS rows a comparison of everything except chain validation.
         tls["insecure"] = True
     else:
+        if link.mldsa:
+            raise UnsupportedShape(
+                "sing-box's REALITY options have no ML-DSA-65 field, so this "
+                "scenario cannot be generated as named for it"
+            )
         tls["reality"] = {
             "enabled": True,
             "public_key": identity.reality_public,

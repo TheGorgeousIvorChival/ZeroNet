@@ -279,6 +279,13 @@ class Window:
     threads_peak: int | None
     samples: int
     missing: bool = False
+    """True when there were too few readings to measure a difference.
+
+    A window with fewer than two samples has no delta to report, and returning
+    zero for it says a core used no CPU -- which is the one reading a reader
+    cannot tell apart from a real zero. The flag exists so the report can say
+    "not observed" instead.
+    """
 
     @property
     def rss_peak_mb(self) -> float:

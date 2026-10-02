@@ -167,6 +167,8 @@ class Cell:
     streams: int = 0
     """How many flows this cell opened. The ceiling is per flow count, so the
     report needs this to pair a row with the ceiling that belongs to it."""
+    notes: str = ""
+    """Why this cell's numbers are thinner than the others, in one sentence."""
     harness_ceiling_mbps: float | None = None
     """The generator's own ceiling at *this cell's* stream count.
 
@@ -671,6 +673,14 @@ class Runner:
                 if server_sampler is not None:
                     server_sampler.__exit__(None, None, None)
             cell.samples = window.samples
+            if window.missing:
+                # Too few readings to have measured a difference. Recorded so the
+                # report can say so rather than print the zero the window carries
+                # for want of anything to compute.
+                cell.notes = (
+                    f"{window.samples} sample(s) were taken, which is too few to "
+                    f"measure a difference, so its CPU and memory read as unmeasured"
+                )
             if sampler.error:
                 cell.diagnostic = sampler.error
             if output is None:
@@ -965,6 +975,10 @@ class Runner:
             time.sleep(0.7)
             cell.rss_idle_mb = _mb(measure.read_rss_kb(proc.pid))
             if config.can_transfer:
+                # The cell says which measurement it is, so the row's headline
+                # follows from the workload alone rather than from a guess made
+                # later about what the cells happen to hold.
+                cell.workload = "passthrough"
                 target = f"{config.measure_host}:{config.measure_port}"
                 args = [
                     "--target", target,
@@ -974,6 +988,7 @@ class Runner:
                 ]
                 ceiling = self.ceiling_for(USER_CONFIG_STREAMS)
             else:
+                cell.workload = "tunnel"
                 # No destination was named, so bytes are not moved. The endpoint
                 # this config names is its own proxy server, which does not speak
                 # the harness's framed protocol, and pointing a transfer at it

@@ -617,12 +617,30 @@ SCALE = [
 ]
 
 
+#: Phrases that mean "the answer is not stated", which is not the same as "no".
+#: They get their own value because charting an unstated answer at zero asserts
+#: the absence of the feature -- the markdown table says only that nothing was
+#: written down.
+UNSTATED = 0.06
+
+
 def scale_value(text: str) -> float:
-    head = text.split(" ")[0].split("(")[0].strip().lower()
+    """A phrase to its position on the capability scale.
+
+    The phrase is matched whole. Splitting on the first space turned "empty block"
+    into "empty", which is not on the scale, and the fallback is zero -- so a stub
+    was charted as absent, and "no stated" was charted as "no".
+    """
+    head = text.split("(")[0].strip().lower()
     for name, value in SCALE:
         if head == name:
             return value
-    return 0.0
+    if "n/a" in head or head in ("n-a", "unknown", "-"):
+        return UNSTATED
+    if head.startswith("no stated") or head.startswith("not stated"):
+        return UNSTATED
+    # Anything unrecognised is unstated rather than zero, for the same reason.
+    return UNSTATED
 
 
 def project_cores() -> list[str]:

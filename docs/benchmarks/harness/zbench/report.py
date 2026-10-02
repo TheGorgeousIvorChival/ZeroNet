@@ -48,6 +48,8 @@ HEADLINE = {
     matrix.UDP: ("latency_us_median", "us", False),
     matrix.HOLD: ("rss_peak_mb", "MB resident", False),
     "passthrough": ("throughput_mbps", "Mbit/s", True),
+    # A supplied config with no destination named is measured by establishing its
+    # tunnel, so its headline is the rate of that and its unit says so.
     "tunnel": ("ops_per_s", "tunnels/s", True),
 }
 
@@ -149,24 +151,15 @@ def aggregate(result: Result) -> dict:
         "scenarios": scenarios,
         "core_order": core_order,
         "baseline": baseline,
+        # The labels are carried into the aggregate so every table can head its
+        # columns the same way; `cover_label` reads them from here.
+        "binaries": result.binaries,
         "rows": {},
     }
     for scenario in scenarios:
         cells_here = [c for (s, _), group in grouped.items() if s == scenario for c in group]
         workload = cells_here[0].workload
         group = cells_here[0].group
-        if workload == "passthrough":
-            # A supplied config is measured either by moving bytes at a named
-            # destination or, with no destination named, by whether its tunnel
-            # comes up and how fast. Reporting the throughput of the second as a
-            # blank cell is worse than reporting the number it did measure, so
-            # the row's headline is chosen from what the cells hold.
-            measured = any(
-                cells[0].throughput_mbps is not None
-                for (s, _c), cells in grouped.items()
-                if s == scenario
-            )
-            workload = "passthrough" if measured else "tunnel"
         field, unit, higher_better = HEADLINE.get(workload, HEADLINE[matrix.DOWN])
         entry: dict = {
             "workload": workload,
@@ -233,10 +226,11 @@ def aggregate(result: Result) -> dict:
                     "server_rss_peak_mb": "MB",
                     "transfer_ms": "ms",
                 }.get(metric, unit)
-                if metric == "threads_peak":
-                    record[name] = max(values)
-                else:
-                    record[name] = stats.summarise(values, unit_name).as_dict()
+                # A thread count is summarised like everything else. It was
+                # stored as a bare integer, which is not the shape the tables
+                # read, so the "Peak threads" section was silently dropped from
+                # every report that had one.
+                record[name] = stats.summarise(values, unit_name).as_dict()
             entry["cores"][core] = record
 
         # Paired comparison to the baseline, on matching repeat indices.
@@ -255,20 +249,18 @@ def aggregate(result: Result) -> dict:
                     candidate, reference, higher_is_better=higher_better
                 ).as_dict()
 
-            # The baseline against itself, split in half: the same statistic the
-            # comparison uses, applied to a difference that should be zero.
+            # The baseline against itself: the size of difference this run can
+            # resolve, which is what a ratio is only meaningful next to.
             values = [getattr(c, field) for c in base_cells if getattr(c, field) is not None]
             if len(values) >= 2:
-                half = len(values) // 2
+                low, high = min(values), max(values)
                 entry["baseline_self_spread"] = {
                     "n": len(values),
-                    "min": min(values),
-                    "max": max(values),
+                    "min": low,
+                    "max": high,
                     "relative_spread": (
-                        (max(values) - min(values)) / min(values) if min(values) else None
+                        (high - low) / low if low else None
                     ),
-                    "first_half": stats.summarise(values[:half]).as_dict(),
-                    "second_half": stats.summarise(values[half:] or values).as_dict(),
                 }
         out["rows"][scenario] = entry
     return out
@@ -776,6 +768,7 @@ def _ratio_cell(versus: dict) -> str:
 def _metric_table(agg: dict, rows: list[str], core_ids: list[str], metric: str, unit: str) -> str:
     lines = ["| Scenario | " + " | ".join(cover_label(agg, c) for c in core_ids) + " |",
              "|---" * (len(core_ids) + 1) + "|"]
+    unit = _UNIT_LABEL.get(unit, unit)
     any_value = False
     for scenario in rows:
         values = []
@@ -787,17 +780,37 @@ def _metric_table(agg: dict, rows: list[str], core_ids: list[str], metric: str, 
                 or record["status"] != STATUS_MEASURED
                 or not isinstance(summary, dict)
             ):
-                # `threads_peak` is a single integer rather than a distribution;
-                # there is nothing to show a median or a spread for.
-                values.append("-")
-                continue
+                if not isinstance(summary, dict):
+                    values.append("-")
+                    continue
             any_value = True
             values.append(_fmt(summary.get("median"), unit) + _span(summary))
         lines.append(f"| `{scenario}` | " + " | ".join(values) + " |")
     return "\n".join(lines) if any_value else ""
 
 
+#: Units the metric tables pass as hints that the number formatter has no branch
+#: for, so the value printed with nothing after it -- "3.50" for a count of CPU
+#: seconds. Both spellings are normalised to the label actually printed.
+_UNIT_LABEL = {
+    "MB": " MB",
+    "s": " s",
+    "ms": " ms",
+    "MB resident": " MB resident",
+    "threads": " threads",
+}
+
+
 def cover_label(agg: dict, core_id: str) -> str:
+    """The heading a core's column carries.
+
+    The group table and the per-metric tables below it must agree: one printed
+    `Zray-core` and the other `zray` in the same section, which reads as two
+    different cores.
+    """
+    for binary in agg.get("binaries") or []:
+        if binary.get("id") == core_id:
+            return binary.get("label") or core_id
     return core_id
 
 
@@ -876,6 +889,16 @@ def gate(
             ["no scenario produced a candidate/base pair, so nothing could be gated"],
         )
 
+    # The tolerance arrives as a percentage, because that is what the flag and
+    # the workflow input both say ("5 means 5%"). It was being used as a fraction
+    # against a ratio that runs from 0 to 1, so `1.0 - 5` is -4.0 and
+    # `interval_high < -4.0` is never true: the gate could not fail on anything,
+    # at any tolerance, while reporting that it had run.
+    if max_regression is not None:
+        max_regression = max_regression / 100.0
+    if min_improvement is not None:
+        min_improvement = min_improvement / 100.0
+
     failures: list[str] = []
     improved: list[dict] = []
     regressed: list[dict] = []
@@ -887,12 +910,19 @@ def gate(
             unresolved.append(row)
             continue
         higher = row["higher_is_better"]
-        # rising == higher-is-better means the candidate is worse.
-        if (row["ratio"] >= 1.0) == higher:
-            regressed.append(row)
-        else:
+        # `ratio` is candidate over reference, so above 1.0 means more of the
+        # metric. That is an improvement when more is better and a regression when
+        # less is. Reading it the other way round reported a 40% throughput
+        # regression as "1 scenario resolved better" and cleared it.
+        candidate_higher = row["ratio"] >= 1.0
+        if candidate_higher == higher:
             improved.append(row)
+        else:
+            regressed.append(row)
         if max_regression is not None:
+            # Worse than the tolerance across the whole interval. On a
+            # higher-is-better metric that is an interval entirely below
+            # 1 - tolerance; on a lower-is-better one, entirely above 1 + it.
             beyond = high < 1.0 - max_regression if higher else low > 1.0 + max_regression
             if beyond:
                 margin = (1.0 - high) if higher else (low - 1.0)
@@ -908,13 +938,15 @@ def gate(
         f"- {len(unresolved)} scenario(s) unresolved: the interval spans 1.00x",
     ]
     if min_improvement is not None:
-        cleared = [
-            r for r in improved
-            if (r["ci95"][0] or 0) > 1.0 + min_improvement
-        ] or [
-            r for r in improved
-            if (r["ci95"][1] or 0) > 1.0 + min_improvement
-        ]
+        # Cleared means the whole interval clears it, so this is the end nearest
+        # 1.0x again. Accepting either end counted an improvement the interval
+        # did not support.
+        cleared = []
+        for r in improved:
+            low_r, high_r = r["ci95"]
+            margin = (low_r - 1.0) if r["higher_is_better"] else (1.0 - high_r)
+            if margin is not None and margin > min_improvement:
+                cleared.append(r)
         parts.append(
             f"- {len(cleared)} scenario(s) cleared an improvement of "
             f"{min_improvement:.0%}"
@@ -956,9 +988,15 @@ def confounders(result: Result, agg: dict) -> list[str]:
         "Zray and Xray-core verify the fixture certificate chain; sing-box has no client "
         "CA option and uses `insecure: true`. The TLS rows therefore differ in "
         "certificate verification as well as in the core.",
-        "Peak memory is the maximum of a sampled resident set: 50 ms on Linux, 200 ms on "
-        "macOS. The kernel's own high-water mark is a separate column on Linux.",
-        "Linux reports CPU in clock ticks, so a window under 10 ms of CPU reads as zero.",
+        "Peak memory is the maximum of a sampled resident set: 50 ms on Linux, 200 ms "
+        "on macOS. The kernel's own high-water mark is recorded per cell in "
+        "`results.json` as `rss_peak_reported_mb`, alongside the server's peak "
+        "resident set in `server_rss_peak_mb`; neither is a column here, because "
+        "neither has a repeat-to-repeat distribution to compare across cores.",
+        "Linux reports CPU in clock ticks, so a window under 10 ms of CPU reads as "
+        "zero. A cell whose sampling produced fewer than two readings has no "
+        "difference to report at all, and is marked in `results.json` with a "
+        "`notes` sentence rather than being shown as a measured zero.",
         "Each comparison's interval is a bootstrap over the paired repeats in that one "
         "run. An interval that spans 1.00x is a difference this run could not resolve.",
         "The harness ceiling is measured with no core in the path, once per stream "
@@ -1030,8 +1068,12 @@ def _plt():
 
 
 def _status_value(status: str) -> float:
+    # A probe run's whole point is the config check, so "accepted" is its success
+    # state. It had no entry here and fell through to the same 0.30 as "not run",
+    # which made the capability job's charts say the opposite of its own table.
     return {
         STATUS_MEASURED: 1.0,
+        STATUS_ACCEPTED: 0.88,
         STATUS_UNSUPPORTED: 0.45,
         STATUS_UNSUPPORTED_CONFIRMED: 0.15,
         STATUS_ERROR: 0.62,
@@ -1089,6 +1131,7 @@ def render_charts(result: Result, agg: dict, cover: dict, outdir: Path) -> list[
     core_ids = agg["core_order"]
     labels = [cover["cores"].get(c, c) for c in core_ids]
     written: list[Path] = []
+    written_names: set[str] = set()
 
     # -- 1. implemented surface, all four projects --------------------------
     chart_ids = [c for c in core_ids if c in caps.project_cores()]
@@ -1156,7 +1199,8 @@ def render_charts(result: Result, agg: dict, cover: dict, outdir: Path) -> list[
             title="Coverage of this run",
             note=(
                 "1.00 carried traffic, 0.62 ran and failed or timed out, 0.45 out of "
-                "scope, 0.30 not run, 0.15 the core's own config check refused it"
+                "scope, 0.30 not run, 0.88 a probe's config check accepted it, "
+                "0.15 the core's own config check refused it"
             ),
         )
         fig.tight_layout()
@@ -1201,6 +1245,10 @@ def render_charts(result: Result, agg: dict, cover: dict, outdir: Path) -> list[
             continue
         entry0 = agg["rows"][rows[0]]
         headline = entry0["metric"]
+        # A metric already drawn as the group's headline is not drawn again: the
+        # memory group leads with `rss_peak_mb`, which also had a `peak-memory`
+        # entry, so every run shipped two byte-identical charts under two names.
+        seen: set[str] = set()
         for metric, filename in (
             (headline, f"{group}-{_slug(headline)}.png"),
             ("cpu_s_per_GB", f"{group}-cpu-per-gb.png"),
@@ -1208,11 +1256,15 @@ def render_charts(result: Result, agg: dict, cover: dict, outdir: Path) -> list[
             ("rss_idle_mb", f"{group}-idle-memory.png"),
             ("connect_us_median", f"{group}-connect-us.png"),
         ):
+            if metric in seen or filename in written_names:
+                continue
+            seen.add(metric)
             path = _metric_chart(plt, agg, cover, rows, core_ids, labels, metric,
                                  entry0["unit"], outdir / filename, group,
                                  result.harness_ceiling_mbps)
             if path:
                 written.append(path)
+                written_names.add(filename)
     return written
 
 

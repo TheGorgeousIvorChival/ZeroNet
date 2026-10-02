@@ -645,7 +645,7 @@ def _user_target() -> None:
     for every core every time. Without a named destination the config must still
     be measured -- the tunnel -- and must not claim a throughput it never got.
     """
-    from zbench import runner as R
+    from zbench import report, runner as R
 
     with tempfile.TemporaryDirectory() as raw:
         directory = pathlib.Path(raw)
@@ -671,6 +671,10 @@ def _user_target() -> None:
         cell = R.Cell(scenario="user:c", group="user", link="user",
                       workload="passthrough", core="xray", repeat=0,
                       status="skipped", streams=R.USER_CONFIG_STREAMS)
+        assert report.HEADLINE["passthrough"][0] == "throughput_mbps"
+        assert report.HEADLINE["tunnel"][0] == "ops_per_s", (
+            "a probed config leads with the tunnel rate, not a throughput it never got"
+        )
         engine.harness_ceiling = None
         engine._ceilings = {}
         window = measure.Window(cpu_s=0.1, rss_peak_kb=1024.0, rss_hwm_kb=None,
@@ -786,40 +790,74 @@ def _gate() -> None:
             "base": 1.0, "ratio": ratio, "ci95": (low, high),
             "verdict": (
                 "within_noise" if low <= 1.0 <= high
-                else "candidate_faster" if low > 1.0 else "candidate_cheaper"
+                else "candidate_better"
             ),
             "pairs": 3, "spread": 0.03,
         }
 
+    # The tolerance is a percentage, because the flag and the workflow input both
+    # say "5 means 5%". Used as a fraction against a 0..1 ratio it became
+    # `1.0 - 5`, so no interval could ever be beyond it and the gate reported that
+    # it had run while being incapable of failing.
+    assert not report.gate([row(0.60, 0.55, 0.65)], max_regression=5).ok, (
+        "a 40% regression must fail a 5% gate"
+    )
+    assert report.gate([row(0.97, 0.96, 0.98)], max_regression=5).ok, (
+        "a 3% regression must pass a 5% gate"
+    )
+    assert not report.gate([row(0.60, 0.55, 0.65)], max_regression=0.5).ok, (
+        "0.5% is a tighter tolerance and still fails on 40%"
+    )
+
     # A 4% regression and a 40% one have the same shape in a point estimate. The
     # interval is what tells them apart, and a gate that only reads the point
     # estimate fails at random.
-    assert report.gate([row(0.96, 0.94, 0.98)], max_regression=0.10).ok
-    assert not report.gate([row(0.60, 0.55, 0.65)], max_regression=0.10).ok
+    assert report.gate([row(0.96, 0.94, 0.98)], max_regression=10).ok
+    assert not report.gate([row(0.60, 0.55, 0.65)], max_regression=10).ok
 
     # An unresolved interval is neither a pass nor a finding: it is the absence of
     # a measurement, and it must not be reported as one.
-    noisy = report.gate([row(0.93, 0.85, 1.10)], max_regression=0.10)
+    noisy = report.gate([row(0.93, 0.85, 1.10)], max_regression=10)
     assert noisy.ok, noisy.lines
     assert any("unresolved" in line for line in noisy.lines)
 
     # Direction is read from the metric, not the sign of the ratio: a ratio above
     # 1.0 is an improvement for throughput and a regression for memory.
-    worse_memory = report.gate([row(1.30, 1.20, 1.40, higher=False)], max_regression=0.10)
+    worse_memory = report.gate([row(1.30, 1.20, 1.40, higher=False)], max_regression=10)
     assert not worse_memory.ok, worse_memory.lines
-    better_memory = report.gate([row(0.90, 0.85, 0.95, higher=False)], max_regression=0.10)
+    better_memory = report.gate([row(0.90, 0.85, 0.95, higher=False)], max_regression=10)
     assert better_memory.ok, better_memory.lines
+
+    # The counts the gate reports have to agree with its verdict. Reading the
+    # ratio's sign alone filed a 40% throughput regression under "resolved
+    # better" and left the gate passing.
+    def counts(g):
+        return [line for line in g.lines if "resolved" in line]
+
+    slower = report.gate([row(0.60, 0.55, 0.65)], max_regression=10)
+    assert any("0 scenario(s) resolved better" in c for c in counts(slower)), slower.lines
+    assert any("1 scenario(s) resolved worse" in c for c in counts(slower)), slower.lines
+    faster = report.gate([row(1.40, 1.35, 1.45)], max_regression=10)
+    assert any("1 scenario(s) resolved better" in c for c in counts(faster)), faster.lines
+    assert any("0 scenario(s) resolved worse" in c for c in counts(faster)), faster.lines
+
+    # "Cleared an improvement" means the whole interval cleared it.
+    marginal = report.gate([row(1.04, 1.02, 1.20)], max_regression=10,
+                           min_improvement=10)
+    assert any("0 scenario(s) cleared" in line for line in marginal.lines), marginal.lines
+    real = report.gate([row(1.40, 1.35, 1.45)], max_regression=10, min_improvement=10)
+    assert any("1 scenario(s) cleared" in line for line in real.lines), real.lines
 
     # One bad scenario among many is still a failure, and it is named.
     mixed = report.gate(
         [row(1.01, 0.99, 1.03, scenario="fine"),
          row(0.70, 0.60, 0.80, scenario="broken")],
-        max_regression=0.10,
+        max_regression=10,
     )
     assert not mixed.ok, mixed.lines
     assert any("`broken`" in line for line in mixed.lines), mixed.lines
 
-    assert not report.gate([], max_regression=0.1).ok, "an empty comparison passed"
+    assert not report.gate([], max_regression=5).ok, "an empty comparison passed"
 
 
 @check("the base core is a real core with a pin and a default slot")
@@ -837,6 +875,36 @@ def _base_core() -> None:
     assert base.can_serve
 
 
+@check("every metric the report lists actually reaches a table")
+def _metrics_render() -> None:
+    """A metric can be aggregated, stored, and still never be printed.
+
+    `threads_peak` was stored as a bare integer while the tables read a summary
+    dictionary, so the section was dropped from every report that had one -- and
+    it only has one on Linux, where `ps` is not the source of a thread count.
+    """
+    from zbench import report, runner as R, stats as S
+
+    cell = R.Cell(scenario="s", group="memory", link="l", workload="hold",
+                  core="xray", repeat=0, status="measured", threads_peak=37)
+    res = R.Result()
+    res.binaries = [{"id": "xray", "label": "Xray-core"}]
+    res.cells = [cell]
+    agg = report.aggregate(res)
+    record = agg["rows"]["s"]["cores"]["xray"]
+    assert isinstance(record["threads_peak"], dict), (
+        f"a table cannot read {record['threads_peak']!r}"
+    )
+    assert record["threads_peak"]["median"] == 37, record["threads_peak"]
+
+    table = report._metric_table(
+        agg, ["s"], ["xray"], "threads_peak", "threads",
+    )
+    assert "37" in table, f"the thread count is missing from its own table:\n{table}"
+    # And the column headings agree with the group table above it.
+    assert "Xray-core" in table, table
+
+
 @check("the chart scale is monotonic and total")
 def _scale() -> None:
     values = [caps.SCALE[i][1] for i in range(len(caps.SCALE))]
@@ -844,8 +912,31 @@ def _scale() -> None:
     assert caps.scale_value("yes") == 1.0
     assert caps.scale_value("no") == 0.0
     assert caps.scale_value("removed") < caps.scale_value("partial")
-    assert caps.scale_value("n-a") == 0.0, "n-a is not a capability, so it reads as absent"
-    assert caps.scale_value("empty block") == caps.scale_value("removed") or True
+    # "not stated" is not "no". Charting an unstated answer at zero asserts the
+    # feature is absent when the table only says nothing was written down, and the
+    # two are drawn identically, so a reader of the chart alone would conclude
+    # something the text never claimed.
+    for unstated in ("n-a", "n/a", "-", "unknown", "no stated"):
+        value = caps.scale_value(unstated)
+        assert value != caps.scale_value("no"), (
+            f"{unstated!r} charts at the same value as `no`, asserting absence"
+        )
+        assert 0 < value < caps.scale_value("empty block"), (unstated, value)
+    # A stub exists, so it must not chart as absent. The phrase was split on the
+    # first space, became "empty", missed the scale, and fell through to zero.
+    assert caps.scale_value("empty block") == 0.10
+    assert caps.scale_value("empty block") > caps.scale_value("no")
+    assert caps.scale_value("no (as of v0.7)") == 0.0, "the qualifier must not break the match"
+    # Every value the capability table actually contains has to land somewhere
+    # real, since the fallback is "unstated" and would otherwise paper over a
+    # phrase the table grows later.
+    from zbench import caps as C
+    values = {getattr(row, core) for row in C.FEATURES
+              for core in ("zray", "xray", "singbox", "xray_rust")}
+    off_scale = sorted({v for v in values if v.split("(")[0].strip().lower()
+                        not in {name for name, _ in C.SCALE}})
+    assert off_scale == ["n-a", "no stated"], off_scale
+    assert all(C.scale_value(v) != C.scale_value("no") for v in off_scale)
 
 
 # ---------------------------------------------------------------------------

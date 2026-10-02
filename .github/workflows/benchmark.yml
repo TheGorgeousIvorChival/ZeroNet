@@ -220,9 +220,18 @@ jobs:
           python3 bench.py "${bench_args[@]}" 2>&1 | tee "$RUNNER_TEMP/support.log"
           exit "${PIPESTATUS[0]}"
 
+      # `always()`, and not advisory: when the run before it failed there may be a
+      # half-written directory, and "cannot read it" is the honest outcome here.
+      # Swallowing the exit status reported every one of these as green while the
+      # command itself had exited 2 because it ran from the workspace root, where
+      # validate_results.py does not exist.
       - name: validate the probe run
         if: always()
-        run: python3 validate_results.py "$RUNNER_TEMP/support" || true
+        working-directory: docs/benchmarks/harness
+        run: |
+          set -o pipefail
+          test -f "$RUNNER_TEMP/support/results.json"
+          python3 validate_results.py "$RUNNER_TEMP/support"
 
       - name: add the report to the job summary
         run: cat "$RUNNER_TEMP/support/report.md" >> "$GITHUB_STEP_SUMMARY"
@@ -378,7 +387,10 @@ jobs:
 
       - name: validate
         if: always()
-        run: python3 validate_results.py "$RUNNER_TEMP/pr" || true
+        working-directory: docs/benchmarks/harness
+        # Gating, not advisory: this is the check that the numbers a pull request
+        # will be judged on are numbers the report actually derived.
+        run: python3 validate_results.py "$RUNNER_TEMP/pr"
 
       - name: the report
         if: always()
@@ -510,7 +522,8 @@ jobs:
 
       - name: validate the run
         if: always()
-        run: python3 validate_results.py "$RUNNER_TEMP/bench" || true
+        working-directory: docs/benchmarks/harness
+        run: python3 validate_results.py "$RUNNER_TEMP/bench"
 
       - name: add the report to the job summary
         if: always()
