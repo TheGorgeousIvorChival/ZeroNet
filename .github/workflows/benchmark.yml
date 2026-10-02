@@ -183,7 +183,7 @@ jobs:
           # recorded in the report next to the binary's digest.
           RUSTUP_TOOLCHAIN=stable cargo build --locked --release -p xray-cli \
             --manifest-path "$RUNNER_TEMP/src/xray-rust/Cargo.toml"
-          install -m 0755 "$RUNNER_TEMP/src/xray-rust/target/release/xray-rust" \
+          install -D -m 0755 "$RUNNER_TEMP/src/xray-rust/target/release/xray-rust" \
             "$RUNNER_TEMP/bin/xray-rust"
           "$RUNNER_TEMP/bin/xray-rust" config check --help > /dev/null
 
