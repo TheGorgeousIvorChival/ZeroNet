@@ -905,6 +905,63 @@ def _metrics_render() -> None:
     assert "Xray-core" in table, table
 
 
+@check("this harness still measures everything the previous one measured")
+def _superset() -> None:
+    """A rewrite that quietly drops a scenario is a regression, not a cleanup.
+
+    The harness this replaced was one protocol at two security layers against two
+    cores, at 1/8/64 streams plus upload, reporting MB/s, CPU per GB, and idle and
+    peak resident memory. Each of those has to remain reachable, or "better"
+    quietly means "less".
+    """
+    from zbench import matrix as M, caps as C
+
+    standard = {s.id: s for s in M.select("standard")}
+    full = {s.id: s for s in M.select("full")}
+
+    for name in ("xray", "zray"):
+        assert name in C.ALL_CORES, f"the comparator {name} is gone"
+
+    for scenario, transport, security, direction, streams in (
+        ("vless-raw-none-down-1", "raw", "none", "down", 1),
+        ("vless-raw-none-down-8", "raw", "none", "down", 8),
+        ("vless-raw-none-down-64", "raw", "none", "down", 64),
+        ("vless-raw-none-up-1", "raw", "none", "up", 1),
+        ("vless-raw-tls-down-1", "raw", "tls", "down", 1),
+    ):
+        found = standard.get(scenario) or full.get(scenario)
+        assert found is not None, f"the previous harness measured {scenario}"
+        assert found.link.security == security, scenario
+        assert found.workload == direction, scenario
+        assert found.streams == streams, (scenario, found.streams)
+
+    # Every metric the previous file recorded: measured on a cell, aggregated into
+    # the record the tables read, and printed. `MBps` was the one that was measured
+    # and aggregated nowhere, and printed nowhere, while the old charts were drawn
+    # in exactly that unit.
+    from zbench import report, runner as R
+    aggregated = report.AGGREGATED_METRICS
+    printed = {m for m, _t, _u in report.PRINTED_METRICS}
+    for metric in ("MBps", "cpu_s_per_GB", "rss_idle_mb", "rss_peak_mb"):
+        assert metric in R.Cell.__dataclass_fields__, f"{metric} is no longer measured"
+        assert metric in aggregated, f"{metric} is measured but not aggregated"
+        assert metric in printed, f"{metric} is aggregated but never printed"
+    # And the unit the previous charts used is printed, not just stored: the old
+    # figures are in MB/s, so a reader comparing them needs it in front of them.
+    units = {u for _m, _t, u in report.PRINTED_METRICS}
+    assert "MB/s" in units, units
+    assert report._fmt(2000.0, "MB/s") == "2.00 GB/s", report._fmt(2000.0, "MB/s")
+    assert report._fmt(800.0, "MB/s") == "800 MB/s", report._fmt(800.0, "MB/s")
+    # A unit with no branch in the formatter prints a bare number, so every unit
+    # the tables pass is checked against the formatter here rather than trusted.
+    for metric, title, unit in report.PRINTED_METRICS:
+        rendered = report._fmt(1234.0, unit)
+        assert not rendered.isdigit(), (
+            f"{metric} is printed as a bare number, so its unit never appears: "
+            f"{rendered!r} for unit {unit!r}"
+        )
+
+
 @check("the chart scale is monotonic and total")
 def _scale() -> None:
     values = [caps.SCALE[i][1] for i in range(len(caps.SCALE))]

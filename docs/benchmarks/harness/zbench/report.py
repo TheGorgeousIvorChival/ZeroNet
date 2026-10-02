@@ -95,6 +95,8 @@ def _fmt(value: float | None, unit: str = "") -> str:
         return f"<{CPU_RESOLUTION_S:g}"
     if unit == "Mbit/s":
         return f"{value / 1000:.2f} Gbit/s" if value >= 10_000 else f"{value:,.0f} Mbit/s"
+    if unit == "MB/s":
+        return f"{value / 1000:.2f} GB/s" if value >= 1000 else f"{value:,.0f} MB/s"
     if unit == "MB resident":
         return f"{value:.1f} MB"
     if unit == "us":
@@ -128,6 +130,38 @@ def index_cells(result: Result) -> dict:
     for cell in result.cells:
         grouped[(cell.scenario, cell.core)].append(cell)
     return grouped
+
+
+#: Every metric the aggregate carries forward. `MBps` is here because it is
+#: measured on every cell and the previous harness charted throughput in MB/s;
+#: without it that unit is collected and never shown.
+AGGREGATED_METRICS = (
+    "throughput_mbps", "MBps", "cpu_s_per_GB", "rss_idle_mb", "rss_peak_mb",
+    "rss_peak_reported_mb", "latency_us_median", "connect_us_median",
+    "tcp_connect_us_median", "socks_connect_us_median", "ops_per_s",
+    "threads_peak", "server_cpu_s", "server_rss_peak_mb", "transfer_ms",
+)
+
+
+def _aggregated_metrics(field: str) -> list[tuple[str, str]]:
+    """The row's own headline metric first, then every other one recorded."""
+    pairs = [(field, field)]
+    pairs += [(m, m) for m in AGGREGATED_METRICS if m != field]
+    return pairs
+
+
+#: The per-metric tables the report prints, as (metric, title, unit).
+PRINTED_METRICS = (
+    ("MBps", "Throughput, the same rows in bytes rather than bits", "MB/s"),
+    ("cpu_s_per_GB", "CPU seconds per gibibyte moved", "s/GB"),
+    ("rss_idle_mb", "Resident memory before any traffic", "MB"),
+    ("rss_peak_mb", "Peak resident memory during the scenario", "MB"),
+    ("connect_us_median", "Time to a usable proxied connection, median", "us"),
+    ("latency_us_median", "Validated round trip, median", "us"),
+    ("ops_per_s", "Completed operations per second", "per second"),
+    ("threads_peak", "Peak threads", ""),
+    ("server_cpu_s", "CPU used by the server process", "s"),
+)
 
 
 def aggregate(result: Result) -> dict:
@@ -187,23 +221,7 @@ def aggregate(result: Result) -> dict:
             if record["status"] != STATUS_MEASURED:
                 entry["cores"][core] = record
                 continue
-            for metric, name in (
-                (field, field),
-                ("throughput_mbps", "throughput_mbps"),
-                ("cpu_s_per_GB", "cpu_s_per_GB"),
-                ("rss_idle_mb", "rss_idle_mb"),
-                ("rss_peak_mb", "rss_peak_mb"),
-                ("rss_peak_reported_mb", "rss_peak_reported_mb"),
-                ("latency_us_median", "latency_us_median"),
-                ("connect_us_median", "connect_us_median"),
-                ("tcp_connect_us_median", "tcp_connect_us_median"),
-                ("socks_connect_us_median", "socks_connect_us_median"),
-                ("ops_per_s", "ops_per_s"),
-                ("threads_peak", "threads_peak"),
-                ("server_cpu_s", "server_cpu_s"),
-                ("server_rss_peak_mb", "server_rss_peak_mb"),
-                ("transfer_ms", "transfer_ms"),
-            ):
+            for metric, name in _aggregated_metrics(field):
                 values = [
                     getattr(c, metric)
                     for c in per_core[core]
@@ -225,6 +243,10 @@ def aggregate(result: Result) -> dict:
                     "server_cpu_s": "s",
                     "server_rss_peak_mb": "MB",
                     "transfer_ms": "ms",
+                    # Bytes per second as well as bits per second. Both are
+                    # measured, and the previous harness charted MB/s, so a reader
+                    # comparing the two has to have it in front of them.
+                    "MBps": "MB/s",
                 }.get(metric, unit)
                 # A thread count is summarised like everything else. It was
                 # stored as a bare integer, which is not the shape the tables
@@ -607,16 +629,7 @@ def render_markdown(result: Result, agg: dict, cover: dict) -> str:
         for scenario in rows:
             add("| `" + scenario + "` | " + " | ".join(_row_cells(agg, scenario, core_ids, baseline)) + " |")
         add("")
-        for metric, title, unit_hint in (
-            ("cpu_s_per_GB", "CPU seconds per gibibyte moved", "s/GB"),
-            ("rss_idle_mb", "Resident memory before any traffic", "MB"),
-            ("rss_peak_mb", "Peak resident memory during the scenario", "MB"),
-            ("connect_us_median", "Time to a usable proxied connection, median", "us"),
-            ("latency_us_median", "Validated round trip, median", "us"),
-            ("ops_per_s", "Completed operations per second", "per second"),
-            ("threads_peak", "Peak threads", ""),
-            ("server_cpu_s", "CPU used by the server process", "s"),
-        ):
+        for metric, title, unit_hint in PRINTED_METRICS:
             block = _metric_table(agg, rows, core_ids, metric, unit_hint)
             if block:
                 add(f"### {title}")

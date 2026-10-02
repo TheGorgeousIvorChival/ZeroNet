@@ -37,11 +37,17 @@
 
 </div>
 
+<!-- These four charts are the 2026-04 measurement, not a current run. The
+     harness that drew them did not validate the payload, timed the transfer
+     window including connection setup, measured no ceiling for its own load
+     generator and held the core order fixed. They are kept so the table above
+     stays backed by the file that produced it. Current runs publish their own
+     charts, in CI, at docs/benchmarks/. -->
 <p align="center">
-  <img src="docs/benchmarks/throughput-tls.png" alt="Throughput, VLESS + TLS" width="49%">
-  <img src="docs/benchmarks/memory.png" alt="Memory usage" width="49%">
-  <img src="docs/benchmarks/cpu-tls.png" alt="CPU per GB, VLESS + TLS" width="49%">
-  <img src="docs/benchmarks/throughput-plain.png" alt="Throughput, plain VLESS" width="49%">
+  <img src="docs/benchmarks/throughput-tls.png" alt="Throughput, VLESS + TLS, measured April 2026" width="49%">
+  <img src="docs/benchmarks/memory.png" alt="Memory usage, measured April 2026" width="49%">
+  <img src="docs/benchmarks/cpu-tls.png" alt="CPU per GB, VLESS + TLS, measured April 2026" width="49%">
+  <img src="docs/benchmarks/throughput-plain.png" alt="Throughput, plain VLESS, measured April 2026" width="49%">
 </p>
 
 <div dir="rtl">
