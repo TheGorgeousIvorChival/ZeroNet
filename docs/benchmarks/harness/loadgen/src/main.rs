@@ -175,45 +175,44 @@ impl Pattern {
         }
     }
 
-    /// Compare a received block against the keystream, 8 bytes at a time.
+    /// Compare a received block against the keystream, 8 bytes at a time, with
+    /// the tail compared byte by byte.
     ///
-    /// Callers always hand over a whole number of 8-byte blocks; `chunk` is
-    /// clamped to a multiple of 8 for exactly that reason.
+    /// The tail is not an edge case to be avoided: `--bytes 100M --streams 3`
+    /// gives each flow 33,333,333.33 bytes, and refusing to validate the last
+    /// block of that reports corruption where there is none. A harness that
+    /// invents a failure is worse than one that misses a real one, because the
+    /// reader has to go and check.
     fn verify(&self, offset: usize, got: &[u8]) -> Result<(), usize> {
-        if got.len() % 8 != 0 {
-            return Err(got.len());
-        }
         let mut expect_at = offset % PATTERN_LEN;
         let mut i = 0;
         while i < got.len() {
             let take = ((PATTERN_LEN - expect_at).min(got.len() - i)) & !7;
-            if take == 0 {
-                // The tail is shorter than one 8-byte block, which only happens
-                // on the last partial write. It can straddle the end of the
-                // keystream, so it is compared as two slices.
-                let want = got.len() - i;
-                let head = (PATTERN_LEN - expect_at).min(want);
-                if self.buf[expect_at..expect_at + head] != got[i..i + head] {
-                    return Err(i);
+            if take > 0 {
+                for (a, b) in self.buf[expect_at..expect_at + take]
+                    .chunks_exact(8)
+                    .zip(got[i..i + take].chunks_exact(8))
+                {
+                    if a != b {
+                        return Err(i);
+                    }
                 }
-                let rest = want - head;
-                if rest > 0 && self.buf[..rest] != got[i + head..i + want] {
-                    return Err(i + head);
-                }
-                i += want;
-                expect_at = 0;
+                i += take;
+                expect_at = (expect_at + take) % PATTERN_LEN;
                 continue;
             }
-            for (a, b) in self.buf[expect_at..expect_at + take]
-                .chunks_exact(8)
-                .zip(got[i..i + take].chunks_exact(8))
-            {
-                if a != b {
+            // Fewer than 8 bytes left before the end of the keystream: wrap and
+            // compare the remainder in at most two slices.
+            let mut want = got.len() - i;
+            while want > 0 {
+                let take = (PATTERN_LEN - expect_at).min(want);
+                if self.buf[expect_at..expect_at + take] != got[i..i + take] {
                     return Err(i);
                 }
+                i += take;
+                want -= take;
+                expect_at = 0;
             }
-            i += take;
-            expect_at = (expect_at + take) % PATTERN_LEN;
         }
         Ok(())
     }
@@ -843,7 +842,7 @@ fn run_flow(
     index: usize,
     down_n: u64,
     up_n: u64,
-    counters: &Counters,
+    counters: &Arc<Counters>,
     pattern: &Arc<Pattern>,
     chunk: usize,
 ) -> io::Result<u64> {
@@ -878,26 +877,31 @@ fn run_flow(
             // times is the receive window: on loopback the reader is the side
             // that can stall, and timing the writer instead would flatter a core
             // whose send path is slower than its receive path.
+            // The writer shares the real counters. They are atomic, so there is
+            // nothing to synchronise beyond the join, and giving the writer a
+            // private pair is how a duplex run reported `bytes_sent: 0` after
+            // writing a hundred megabytes and a rate half of the truth.
             let mut writer = sock.try_clone()?;
             let write_pattern = pattern.clone();
-            let write_counters = Arc::new(Counters::new());
+            let write_counters = counters.clone();
             let handle = thread::spawn(move || {
                 send_side(&mut writer, base, up, &write_counters, &write_pattern)
             });
             let received = recv_side(&mut sock, base, down, counters, pattern, chunk);
-            // If the reader is still blocked on a peer that stopped reading, a
-            // half-close lets it see an EOF instead of waiting forever.
-            let ack = read_exact(&mut sock, &mut [0u8; 1]);
+            // No half-close here. The reader has already returned, so there is
+            // nobody to unblock, and shutting the write side at this point
+            // discards the sink's completion byte through any relay that tears a
+            // connection down on EOF -- which a proxy, or a user's own forwarder,
+            // very well might.
             let sent = match handle.join() {
                 Ok(r) => r,
                 Err(_) => Err(io::Error::other("duplex writer panicked")),
             };
             received?;
             sent?;
-            let up_sent = counters.sent.load(Ordering::Relaxed);
-            let _ = up_sent;
-            ack?;
-            Ok(down + up)
+            let mut ack = [0u8; 1];
+            read_exact(&mut sock, &mut ack)?;
+            Ok(counters.sent.load(Ordering::Relaxed) + counters.received.load(Ordering::Relaxed))
         }
     }
 }
@@ -906,7 +910,7 @@ fn send_side(
     sock: &mut TcpStream,
     base: usize,
     total: u64,
-    counters: &Counters,
+    counters: &Arc<Counters>,
     pattern: &Arc<Pattern>,
 ) -> io::Result<()> {
     let mut block = Vec::with_capacity(BLOCK);
@@ -930,7 +934,7 @@ fn recv_side(
     sock: &mut TcpStream,
     base: usize,
     total: u64,
-    counters: &Counters,
+    counters: &Arc<Counters>,
     pattern: &Arc<Pattern>,
     chunk: usize,
 ) -> io::Result<u64> {
@@ -971,6 +975,16 @@ fn recv_side(
 /// fewer threads than flows measures the thread count. `hold` is the opposite:
 /// it opens a thousand flows and then sends nothing, so a thousand threads
 /// would measure the harness's scheduler instead of the core's memory.
+/// A direction's byte count for one flow: the flow's own share in the
+/// download or upload direction, and nothing in the other.
+fn flow_counts(share: u64, direction: u64) -> u64 {
+    if direction == 0 {
+        0
+    } else {
+        share
+    }
+}
+
 fn worker_count(mode: &str, streams: usize) -> usize {
     if mode == "hold" {
         return opt_usize("--concurrency").unwrap_or(32).clamp(1, streams);
@@ -982,6 +996,12 @@ fn worker_count(mode: &str, streams: usize) -> usize {
 
 fn cmd_bulk(proxy: Proxy, target: SocketAddr, mode: &str) -> J {
     let bytes = opt_count("--bytes").unwrap_or(256 * 1024 * 1024);
+    if bytes == 0 && mode != "hold" {
+        // A zero-length transfer encodes as "no payload in either direction",
+        // which is the hold shape. Taking it as a request to move no bytes and
+        // report a rate of zero would be a plausible-looking wrong answer.
+        return die("--bytes must be at least 1 unless the mode is `hold`");
+    }
     let streams = opt_usize("--streams").unwrap_or(1).max(1);
     let chunk = opt_usize("--chunk").unwrap_or(BLOCK);
     let hold_ms = opt_count("--hold-ms").unwrap_or(0);
@@ -991,6 +1011,11 @@ fn cmd_bulk(proxy: Proxy, target: SocketAddr, mode: &str) -> J {
     let ramp_us = opt_count("--ramp-us").unwrap_or(0);
     let pattern = Arc::new(Pattern::new(opt_count("--seed").unwrap_or(DEFAULT_SEED)));
     let per = bytes / streams as u64;
+    // The remainder goes to the first `bytes % streams` flows, so the flows add
+    // up to exactly what was requested. Truncating instead loses up to
+    // `streams - 1` bytes, and a request that silently moves less than it asked
+    // for is a defect a reader has to notice on their own.
+    let remainder = bytes % streams as u64;
     let counters = Arc::new(Counters::new());
     let (down_n, up_n) = match mode {
         "down" => (per, 0),
@@ -1029,6 +1054,7 @@ fn cmd_bulk(proxy: Proxy, target: SocketAddr, mode: &str) -> J {
                 if index >= streams {
                     break;
                 }
+                let share = per + u64::from((index as u64) < remainder);
                 if ramp_us > 0 {
                     thread::sleep(Duration::from_micros(ramp_us));
                 }
@@ -1048,7 +1074,13 @@ fn cmd_bulk(proxy: Proxy, target: SocketAddr, mode: &str) -> J {
                             let flow = Flow {
                                 setup_us: timing.total.as_secs_f64() * 1e6,
                                 result: run_flow(
-                                    sock, index, down_n, up_n, &counters, &pattern, chunk,
+                                    sock,
+                                    index,
+                                    flow_counts(share, down_n),
+                                    flow_counts(share, up_n),
+                                    &counters,
+                                    &pattern,
+                                    chunk,
                                 ),
                             };
                             opened.fetch_add(1, Ordering::Relaxed);
@@ -1130,7 +1162,11 @@ fn cmd_bulk(proxy: Proxy, target: SocketAddr, mode: &str) -> J {
         ("flows_opened".into(), J::U(opened.load(Ordering::Relaxed))),
         ("open_ms".into(), J::N(open_ms)),
         ("ramp_us".into(), J::U(ramp_us)),
-        ("bytes_requested".into(), J::U(bytes)),
+        // `--bytes` is the request *per direction*: `down` and `up` move it
+        // once, `duplex` moves it once each way. Stated here because
+        // `bytes_moved` is the total, and the ratio between the two is 1 or 2.
+        ("bytes_requested_per_direction".into(), J::U(bytes)),
+        ("directions".into(), J::U(if down_n > 0 && up_n > 0 { 2 } else { 1 })),
         ("bytes_sent".into(), J::U(sent)),
         ("bytes_received".into(), J::U(received)),
         ("bytes_moved".into(), J::U(moved)),
@@ -1386,12 +1422,14 @@ fn cmd_selftest(target: SocketAddr) -> J {
     let chunk = opt_usize("--chunk").unwrap_or(BLOCK);
     let pattern = Arc::new(Pattern::new(opt_count("--seed").unwrap_or(DEFAULT_SEED)));
     let per = bytes / streams as u64;
+    let remainder = bytes % streams as u64;
     let counters = Arc::new(Counters::new());
     let started = Instant::now();
     let mut handles = Vec::new();
     for i in 0..streams {
         let counters = counters.clone();
         let pattern = pattern.clone();
+        let share = per + u64::from((i as u64) < remainder);
         handles.push(thread::spawn(move || {
             let sock = match TcpStream::connect(target) {
                 Ok(sock) => sock,
@@ -1401,8 +1439,9 @@ fn cmd_selftest(target: SocketAddr) -> J {
                 }
             };
             let _ = sock.set_nodelay(true);
-            // A download: the sink writes `per`, this side reads and validates.
-            if let Err(e) = run_flow(sock, i, per, 0, &counters, &pattern, chunk) {
+            // A download: the sink writes this flow's share, this side reads
+            // and validates every byte of it.
+            if let Err(e) = run_flow(sock, i, share, 0, &counters, &pattern, chunk) {
                 eprintln!("selftest: flow {i} failed: {e}");
             }
         }));
