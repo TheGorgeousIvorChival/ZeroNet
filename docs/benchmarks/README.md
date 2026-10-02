@@ -122,6 +122,33 @@ what this change did. `@merged-prs` says what this change did once everything
 else lands with it, which is the only one of the two that matches what a user
 will actually run.
 
+## Two findings from actually running the comparison
+
+**Not all ten open pull requests combine.** Merging them all into `main` fails in
+`crates/zero-protocol/src/vision.rs`, which **#30**, **#33** and **#38** each
+edit. So there is no single "everything lands" state to measure against today,
+and "do all our changes improve" cannot be answered until either #38 lands first
+or the other side rebases. The harness refuses rather than producing a baseline
+that is half of each thing, and it names the pull request and the file.
+
+**Your own benchmark runs, in CI, against either end of that.** Candidate is this
+branch in both runs; the base differs:
+
+- `--base-ref @main` — `main` with no pull request applied
+- `--base-ref bench/prs-merged` — `main` with the nine that combine
+
+Comparing the base rows across the two runs is a direct measurement of what the
+other pull requests do, with the same candidate and the same host underneath both.
+
+Two bugs only running it could find:
+
+- **A pull request head moves**, and `git fetch` refuses a non-fast-forward update
+  to a remote-tracking ref. The baseline of any busy repository could only ever be
+  built once. Found on the second run.
+- **`gh` authenticates from the environment in Actions and nowhere else**, so the
+  sentinel failed on a dispatch run with advice about `GH_TOKEN` instead of a
+  measurement.
+
 ### Supplying your own configurations
 
 `workflow_dispatch` takes a `user_configs` textarea and a `user_config_urls`

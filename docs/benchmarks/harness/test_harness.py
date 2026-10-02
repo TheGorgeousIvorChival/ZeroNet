@@ -1069,6 +1069,22 @@ def _pr_base() -> None:
 
     assert prbase.MERGED.startswith("@") and prbase.PLAIN.startswith("@")
 
+    # A pull request head moves when its author pushes, and a plain fetch refuses
+    # the non-fast-forward update -- so without the force the baseline of a busy
+    # repository could only be built once.
+    import inspect
+    source = inspect.getsource(prbase.merged_prs_ref)
+    assert "+refs/pull/" in source, (
+        "the pull request refspec is not forced, so a moved head is rejected as a "
+        "non-fast-forward update"
+    )
+    assert "CONFLICT" in inspect.getsource(prbase.merged_prs_ref), (
+        "a conflicting merge must name the files, not just stop"
+    )
+    # And the exclusion path exists, because not every set combines.
+    assert "exclude" in inspect.signature(prbase.merged_prs_ref).parameters
+    assert "exclude" in inspect.signature(prbase.list_pull_requests).parameters
+
     # A plain sentinel is passed through untouched, with a description.
     value, notes = prbase.resolve_base_ref(".", prbase.PLAIN, repo="x/y")
     assert value == prbase.PLAIN, value
