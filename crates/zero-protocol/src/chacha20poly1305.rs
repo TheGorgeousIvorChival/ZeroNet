@@ -72,7 +72,10 @@ impl ChaCha20Poly1305 {
         // A branch on the first differing byte would leak the tag. This walks
         // all sixteen regardless.
         let mut diff = 0u8;
-        for (b, t) in finish(poly).iter().zip(tag.iter().chain(core::iter::repeat(&0))) {
+        for (b, t) in finish(poly)
+            .iter()
+            .zip(tag.iter().chain(core::iter::repeat(&0)))
+        {
             diff |= b ^ t;
         }
         if diff != 0 {
