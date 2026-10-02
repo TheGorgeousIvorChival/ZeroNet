@@ -449,6 +449,7 @@ def resolve_zray_base(
     timeout: float,
     toolchain: str | None = None,
     allow_build: bool = True,
+    given: Path | None = None,
 ) -> CoreBinary:
     """Build Zray from `ref` in its own worktree, and register it as a core.
 
@@ -459,6 +460,24 @@ def resolve_zray_base(
     which is the one failure mode here that would produce a confident, wrong
     number rather than an obvious one.
     """
+    # An explicit binary wins. The error below names `--bin-zray-base` as the way
+    # to supply one, so accepting the flag and then rebuilding regardless made
+    # that advice a lie -- and on a small runner, rebuilding is exactly the cost
+    # the caller was trying to avoid.
+    if given is not None:
+        binary = Path(given)
+        if not binary.exists():
+            raise SystemExit(f"--bin-{caps.BASE_ID} is {binary}, which does not exist")
+        version, note = _probe_version(caps.ZRAY_BASE, binary)
+        return CoreBinary(
+            core=caps.ZRAY_BASE,
+            path=binary,
+            version=version,
+            version_note=note,
+            digest=sha256(binary),
+            origin="provided",
+            source_revision=ref,
+        )
     if not ref:
         raise SystemExit(
             f"{caps.BASE_ID} needs --base-ref: it is Zray built from a ref, and "
@@ -569,7 +588,8 @@ def resolve_all(
         try:
             if core_id == caps.BASE_ID:
                 out[core_id] = resolve_zray_base(
-                    root, base_ref, bin_dir, timeout, toolchain, allow_build
+                    root, base_ref, bin_dir, timeout, toolchain, allow_build,
+                    given_path,
                 )
             elif core_id == "zray":
                 out[core_id] = resolve_zray(root, given_path, allow_build)

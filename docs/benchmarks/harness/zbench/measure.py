@@ -41,6 +41,10 @@ CLOCK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 # produce repeated values.
 DEFAULT_INTERVAL = 0.05 if IS_LINUX else 0.2
 
+#: Consecutive failed reads before sampling gives up on a live process. One is
+#: ordinary contention; a run of them means sampling is not working.
+MISSES_BEFORE_GIVING_UP = 5
+
 
 @dataclass
 class Sample:
@@ -50,7 +54,7 @@ class Sample:
     threads: int | None
 
 
-def _read_linux(pid: int) -> tuple[float, float, int] | None:
+def _read_linux(pid: int) -> tuple[float, int | None] | None:
     try:
         with open(f"/proc/{pid}/stat", "rb") as fh:
             data = fh.read()
@@ -67,8 +71,7 @@ def _read_linux(pid: int) -> tuple[float, float, int] | None:
         return None
     utime = int(fields[11])
     stime = int(fields[12])
-    threads = int(fields[17])
-    return (utime + stime) / CLOCK_TCK, float(threads), threads
+    return (utime + stime) / CLOCK_TCK, int(fields[17])
 
 
 def _read_linux_rss(pid: int) -> float | None:
@@ -144,16 +147,17 @@ def _read_darwin(pid: int) -> tuple[float, float, int | None] | None:
     cpu = _ps_time_to_seconds(parts[1])
     if cpu is None:
         return None
-    return rss, cpu, 0
+    # `ps` does not report a thread count here, so this stays None rather than a
+    # placeholder zero that a consumer would read as "measured, and it was none".
+    return rss, cpu, None
 
 
 def read_once(pid: int) -> Sample | None:
-    now = time.monotonic()
     if IS_LINUX:
         cpu = _read_linux(pid)
         if cpu is None:
             return None
-        cpu_s, _threads_unused, threads = cpu
+        cpu_s, threads = cpu
         rss = _read_linux_rss(pid)
         if rss is None:
             return None
@@ -162,8 +166,9 @@ def read_once(pid: int) -> Sample | None:
         if values is None:
             return None
         rss, cpu_s, threads = values
-        threads = None
-    return Sample(at=now, rss_kb=rss, cpu_s=cpu_s, threads=threads)
+    # Timestamped after the read, not before: on macOS this is a `ps` fork, and a
+    # timestamp taken first would understate when the counters were actually read.
+    return Sample(at=time.monotonic(), rss_kb=rss, cpu_s=cpu_s, threads=threads)
 
 
 def read_rss_kb(pid: int) -> float | None:
@@ -173,6 +178,24 @@ def read_rss_kb(pid: int) -> float | None:
 
 def read_hwm_kb(pid: int) -> float | None:
     return _read_linux_hwm(pid) if IS_LINUX else None
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether the process still exists, which is not the same as readable.
+
+    A failed read has two very different causes -- a dead process and a slow or
+    contended one -- and only the first is a finding. This distinguishes them
+    without depending on the sampling read succeeding.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class Sampler:
@@ -191,6 +214,14 @@ class Sampler:
         self.error: str | None = None
 
     def __enter__(self) -> "Sampler":
+        # The baseline is read here, synchronously, before the caller starts the
+        # workload. Left to the thread, the first read races the workload it is
+        # supposed to precede, and a transfer quicker than one sampling interval
+        # produced a single sample -- no window at all, so a fast core reported
+        # zero CPU rather than a small number it had not measured.
+        baseline = read_once(self.pid)
+        if baseline is not None:
+            self.samples.append(baseline)
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         return self
@@ -199,13 +230,28 @@ class Sampler:
         self.stop()
 
     def _loop(self) -> None:
+        misses = 0
         while not self._stop.is_set():
             sample = read_once(self.pid)
             if sample is None:
-                # The process is gone. That is information, not a crash: a core
-                # that died mid-sample is a result the report must show.
-                self.error = "process disappeared while sampling"
-                return
+                # A failed read is not the same as a dead process. On macOS this
+                # is a `ps` fork per sample, and one slow fork was ending the
+                # series and filing the cell as "process disappeared" while the
+                # process was still running. Only the process actually being gone
+                # is that finding, and `pid_alive` is the only thing that says so.
+                misses += 1
+                if not pid_alive(self.pid):
+                    self.error = "process disappeared while sampling"
+                    return
+                if misses >= MISSES_BEFORE_GIVING_UP:
+                    self.error = (
+                        f"{misses} consecutive sample reads failed while the "
+                        f"process was still running"
+                    )
+                    return
+                self._stop.wait(self.interval)
+                continue
+            misses = 0
             self.samples.append(sample)
             self._stop.wait(self.interval)
 
@@ -213,6 +259,14 @@ class Sampler:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2)
+        # One last read, so the CPU window ends at the workload rather than up to
+        # one interval before it. The counters are cumulative, so the window is
+        # `last - first`; without a closing read that difference silently omits
+        # the tail of the transfer, which is a fixed cost and proportionally the
+        # largest on the shortest cells.
+        final = read_once(self.pid)
+        if final is not None:
+            self.samples.append(final)
 
 
 @dataclass
@@ -242,6 +296,12 @@ class Window:
 def summarise(samples: list[Sample], pid: int | None = None) -> Window:
     if not samples:
         return Window(0.0, 0.0, None, None, 0, missing=True)
+    if len(samples) < 2:
+        # One sample is a single reading, not a difference. Returning 0.0 for the
+        # CPU delta of a lone sample reports "this core used no CPU" for a core
+        # that was never observed twice, which is the one reading a reader cannot
+        # distinguish from a real zero.
+        return Window(0.0, samples[-1].rss_kb, None, None, len(samples), missing=True)
     peak = max(s.rss_kb for s in samples)
     threads = [s.threads for s in samples if s.threads]
     return Window(

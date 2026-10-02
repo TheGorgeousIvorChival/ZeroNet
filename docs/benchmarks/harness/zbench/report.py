@@ -175,6 +175,8 @@ def aggregate(result: Result) -> dict:
                 "reason": cells[0].reason,
                 "diagnostic": cells[0].diagnostic,
                 "repeats": len(cells),
+                "streams": cells[0].streams,
+                "harness_ceiling_mbps": cells[0].harness_ceiling_mbps,
             }
             if record["status"] != STATUS_MEASURED:
                 entry["cores"][core] = record
@@ -942,21 +944,28 @@ def confounders(result: Result, agg: dict) -> list[str]:
         "Linux reports CPU in clock ticks, so a window under 10 ms of CPU reads as zero.",
         "Each comparison's interval is a bootstrap over the paired repeats in that one "
         "run. An interval that spans 1.00x is a difference this run could not resolve.",
-        "The harness ceiling is measured with no core in the path. A row at or above "
-        f"{HARNESS_BOUND:.0%} of it is bounded by the generator.",
+        "The harness ceiling is measured with no core in the path, once per stream "
+        f"count. A row at or above {HARNESS_BOUND:.0%} of the ceiling for its own "
+        "stream count is bounded by the generator rather than by the core.",
         "The generated REALITY server widens `minClientVer` and `maxClientVer`. Left at "
         "their defaults those bounds are a client-version policy, and the rows would "
         "measure version strings rather than the protocol.",
     ]
+    # Each row is judged against the ceiling measured at its own stream count.
+    # The ceiling is a property of the generator's loop, and the loop is not the
+    # same at one flow as at sixty-four: measured on one host the same generator
+    # reached 78 Gbit/s at 1 stream, 86 at 8 and 5.7 at 64. Testing every row
+    # against one number silently freed the many-flow rows -- the ones the
+    # generator is actually holding back -- and convicted none of them.
     bound = [
         (scenario, core)
         for scenario, entry in agg["rows"].items()
         for core, record in entry["cores"].items()
         if record.get("status") == STATUS_MEASURED
         and (record.get("throughput_mbps") or {}).get("median")
-        and result.harness_ceiling_mbps
+        and record.get("harness_ceiling_mbps")
         and record["throughput_mbps"]["median"]
-        >= result.harness_ceiling_mbps * HARNESS_BOUND
+        >= record["harness_ceiling_mbps"] * HARNESS_BOUND
     ]
     if bound:
         out.insert(
@@ -1252,13 +1261,28 @@ def _metric_chart(plt, agg, cover, rows, core_ids, labels, metric, unit, path, g
                     va="bottom", fontsize=5.5, color="#9CA3AF", rotation=90)
 
     subtitle = []
-    if ceiling and metric == "throughput_mbps":
+    # A horizontal ceiling line is only a true statement about rows that all ran
+    # at the same flow count. Across a mixed chart it would draw one number over
+    # rows measured under different conditions, so it is only drawn when every
+    # row shares that ceiling, and otherwise the variation is stated instead.
+    ceilings = {
+        r["harness_ceiling_mbps"]
+        for r in (agg["rows"][name]["cores"].get(core) or {} for name in rows for core in core_ids)
+        if r.get("harness_ceiling_mbps")
+    }
+    if ceiling and metric == "throughput_mbps" and len(ceilings) == 1:
         if ceiling <= top * 3:
             ax.axhline(ceiling, color="#94A3B8", linestyle="--", linewidth=1)
             ax.text(len(rows) - 0.45, ceiling, " harness ceiling", va="bottom",
                     ha="right", fontsize=7, color="#94A3B8")
         else:
             subtitle.append(f"harness ceiling {ceiling:,.0f} {unit}, off this scale")
+    elif len(ceilings) > 1:
+        subtitle.append(
+            "harness ceiling varies by flow count ("
+            + ", ".join(f"{c / 1000:,.0f} {unit}" for c in sorted(ceilings))
+            + ")"
+        )
     direction = (
         "higher is better" if agg["rows"][rows[0]]["higher_is_better"] else "lower is better"
     )

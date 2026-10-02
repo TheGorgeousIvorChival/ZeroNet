@@ -384,8 +384,34 @@ def _stats() -> None:
     )
 
     clean = stats.paired_ratio([120, 121, 119, 120, 118], [100, 100, 100, 100, 100])
-    assert clean.verdict == "candidate_faster", clean.verdict
+    assert clean.verdict == "candidate_better", clean.verdict
     assert clean.ci_low and clean.ci_low > 1.0, clean.as_dict()
+
+    # Direction comes from the metric, not from the sign of the ratio. The same
+    # ratio is an improvement on a throughput row and a regression on a memory or
+    # latency row, and reading the ratio alone once labelled a 20% memory
+    # increase "candidate_cheaper".
+    slower = stats.paired_ratio([120, 121, 119, 120, 118], [100] * 5, higher_is_better=False)
+    assert slower.verdict == "candidate_worse", slower.verdict
+    leaner = stats.paired_ratio([80, 81, 79, 80, 78], [100] * 5, higher_is_better=False)
+    assert leaner.verdict == "candidate_better", leaner.verdict
+
+    # The quoted margin is the end of the interval nearest 1.0x, because that is
+    # the end the whole interval guarantees. Quoting the far end promises more
+    # than the data supports.
+    assert f"{((clean.ci_low or 1) - 1) * 100:.0f}%" in clean.explanation, clean.explanation
+    assert f"{(1 - (leaner.ci_high or 1)) * 100:.0f}%" in leaner.explanation, leaner.explanation
+    assert f"{((clean.ci_high or 1) - 1) * 100:.0f}%" not in clean.explanation, (
+        "the far end of the interval must not be quoted as the guaranteed margin: "
+        + clean.explanation
+    )
+
+    # A zero reference sample has no ratio, so it must leave the pair count too:
+    # counting a pair the statistics never saw is how one ratio gets described as
+    # a two-pair result.
+    zeroed = stats.paired_ratio([10, 0], [10, 0])
+    assert zeroed.verdict == "unproven", zeroed.verdict
+    assert zeroed.pairs == 1, zeroed.pairs
 
     cheap = stats.paired_ratio([1, 1], [1, 1], higher_is_better=False)
     assert stats.paired_ratio([1], [1]).verdict == "unproven"

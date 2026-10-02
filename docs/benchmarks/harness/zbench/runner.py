@@ -160,7 +160,18 @@ class Cell:
     threads_peak: int | None = None
     server_cpu_s: float | None = None
     server_rss_peak_mb: float | None = None
+    streams: int = 0
+    """How many flows this cell opened. The ceiling is per flow count, so the
+    report needs this to pair a row with the ceiling that belongs to it."""
     harness_ceiling_mbps: float | None = None
+    """The generator's own ceiling at *this cell's* stream count.
+
+    Not the run's single summary number: the ceiling is a property of the loop,
+    and the loop differs at one flow and at sixty-four. Measured on this host the
+    same generator reached 78 Gbit/s at 1 stream, 86 at 8 and 5.7 at 64, so one
+    number for the whole run would mark 64-flow rows as unbounded when they are
+    in fact the ones the generator itself is holding back.
+    """
     samples: int = 0
 
 
@@ -182,6 +193,8 @@ class Result:
     to know that from the file rather than by noticing empty columns."""
     identity: dict = field(default_factory=dict)
     harness_ceiling_mbps: float | None = None
+    harness_ceilings: dict[str, float] = field(default_factory=dict)
+    """Stream count -> measured ceiling in Mbit/s, one per stream count used."""
     ceiling_note: str = ""
     cells: list[Cell] = field(default_factory=list)
     user_configs: list[dict] = field(default_factory=list)
@@ -260,6 +273,7 @@ class Runner:
         self.timeout = timeout
         self.harness_ceiling = harness_ceiling
         self.sink_port = sink_port
+        self._loadgen_fault: str = ""
         self._reality_dest_port: int | None = None
         self._reality_dest: "TlsDest | None" = None
         self.probe_only = probe_only
@@ -402,46 +416,68 @@ class Runner:
         value = (out or {}).get("throughput_mbps")
         self._ceilings[streams] = value
         if value:
-            # The summary ceiling is the first one measured, not a hardcoded
-            # stream count: no suite uses 4 streams, so pinning the summary to it
-            # meant the ceiling was measured on every run and reported on none.
-            # The per-stream values are what the charts annotate against.
+            self.result.harness_ceilings[str(streams)] = round(value, 3)
+            # The summary is the ceiling at the most streams any scenario uses,
+            # because that is the number a reader compares a headline against.
+            # It is a summary, not the value rows are gated on: each row uses the
+            # ceiling measured at its own stream count.
             if self.result.harness_ceiling_mbps is None:
                 self.result.harness_ceiling_mbps = value
                 self.result.ceiling_note = (
                     f"measured with the same validated loop and no core in the "
                     f"path, on this host, at {streams} stream(s); every stream "
-                    f"count a scenario uses is measured separately"
+                    f"count a scenario uses is measured separately, and each row "
+                    f"is compared against the ceiling at its own stream count"
                 )
             log(f"harness ceiling at {streams} stream(s): {value / 1000:.1f} Gbps")
-        elif self.result.harness_ceiling_mbps is None:
-            # A ceiling that could not be measured is a gap in the report, not a
-            # ceiling of zero, and saying so is better than an absent field.
-            self.result.ceiling_note = (
-                f"not measured at {streams} stream(s): the load generator did not "
-                f"return a rate, so the rows below are unbounded by any ceiling"
-            )
+        else:
             self.result.notes.append(
                 f"the harness ceiling was not measured at {streams} stream(s); "
-                f"read the rows as unbounded rather than as bounded"
+                f"rows at that stream count are unbounded by any ceiling"
             )
+            if self.result.harness_ceiling_mbps is None:
+                self.result.ceiling_note = (
+                    f"not measured at {streams} stream(s): the load generator did "
+                    f"not return a rate, so the rows are unbounded by any ceiling"
+                )
         return value
 
     # -- loadgen -------------------------------------------------------------
 
     def _loadgen(self, args: list[str], *, timeout: float) -> dict | None:
+        """Run the generator and parse its JSON.
+
+        Three outcomes are deliberately kept apart. Only the first is a timeout;
+        a generator that exits non-zero or prints malformed JSON has crashed or
+        misbehaved, and the caller used to be told it had run out of time -- which
+        sends a reader looking at a core that was never the problem. The reason is
+        returned alongside so `run_cell` can report which one happened.
+        """
+        self._loadgen_fault = ""
         try:
             proc = subprocess.run(
                 [str(self.loadgen), *args], capture_output=True, text=True, timeout=timeout
             )
         except subprocess.TimeoutExpired:
+            self._loadgen_fault = f"the load generator did not finish within {timeout:.0f}s"
             return None
         text = proc.stdout.strip()
+        if proc.returncode != 0:
+            self._loadgen_fault = (
+                f"the load generator exited {proc.returncode}: "
+                f"{(proc.stderr or text).strip()[:300] or 'no output'}"
+            )
+            return None
         if not text:
+            self._loadgen_fault = "the load generator printed nothing"
             return None
         try:
             return json.loads(text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            self._loadgen_fault = (
+                f"the load generator printed output that is not JSON ({exc.msg} at "
+                f"position {exc.pos}): {text[:200]!r}"
+            )
             return None
 
     # -- server --------------------------------------------------------------
@@ -530,6 +566,7 @@ class Runner:
             core=core_id,
             repeat=repeat,
             status=STATUS_SKIPPED,
+            streams=scenario.streams,
         )
 
         prior = binary.core.why_not(
@@ -596,8 +633,6 @@ class Runner:
         server_sampler = (
             measure.Sampler(server_proc.pid) if server_proc is not None else None
         )
-        if server_sampler is not None:
-            server_sampler.__enter__()
         try:
             if not cores.wait_for_port(int(proxy_port), proc.proc, timeout=25):
                 cell.status = STATUS_ERROR
@@ -612,19 +647,36 @@ class Runner:
             cell.rss_idle_mb = _mb(measure.read_rss_kb(proc.pid))
             cell.rss_peak_reported_mb = _mb(measure.read_hwm_kb(proc.pid))
 
-            with measure.Sampler(proc.pid) as sampler:
-                output = self._run_workload(scenario, int(proxy_port))
-                window = measure.summarise(sampler.samples, proc.pid)
+            # The server is sampled inside the client's window, not from the
+            # moment the client process was launched. Started alongside the
+            # process, its window also covered the client's port wait and settle
+            # sleep, so a column labelled "CPU used by the server during this
+            # scenario" was measuring a longer period than the client's, and its
+            # peak memory could only be inflated by that extra time.
+            if server_sampler is not None:
+                server_sampler.__enter__()
+            try:
+                with measure.Sampler(proc.pid) as sampler:
+                    output = self._run_workload(scenario, int(proxy_port))
+                    window = measure.summarise(sampler.samples, proc.pid)
+                    if server_sampler is not None:
+                        server_window = measure.summarise(server_sampler.samples, server_proc.pid)
+                        cell.server_cpu_s = server_window.cpu_s
+                        cell.server_rss_peak_mb = server_window.rss_peak_mb
+            finally:
                 if server_sampler is not None:
-                    server_window = measure.summarise(server_sampler.samples, server_proc.pid)
-                    cell.server_cpu_s = server_window.cpu_s
-                    cell.server_rss_peak_mb = server_window.rss_peak_mb
+                    server_sampler.__exit__(None, None, None)
             cell.samples = window.samples
             if sampler.error:
                 cell.diagnostic = sampler.error
             if output is None:
-                cell.status = STATUS_TIMEOUT
-                cell.reason = f"the load generator did not finish within {self.timeout:.0f}s"
+                # Whether this was a hang or a crash changes what it means, and
+                # only the generator knows which.
+                fault = self._loadgen_fault or f"the load generator failed within {self.timeout:.0f}s"
+                cell.status = (
+                    STATUS_TIMEOUT if fault.startswith("did not finish") else STATUS_ERROR
+                )
+                cell.reason = fault
                 cell.diagnostic = proc.log_tail(400)
                 return cell
             if output.get("errors"):
@@ -651,8 +703,6 @@ class Runner:
             self._fill(cell, output, window)
             cell.status = STATUS_MEASURED
         finally:
-            if server_sampler is not None:
-                server_sampler.__exit__(None, None, None)
             proc.stop()
         return cell
 
@@ -730,9 +780,17 @@ class Runner:
         cell.flows_opened = output.get("flows_opened")
         cell.open_ms = output.get("open_ms")
         wall_ms = output.get("wall_ms") or output.get("total_ms") or 0.0
-        if cell.workload in (matrix.LATENCY, matrix.CHURN, matrix.UDP) and wall_ms:
-            iterations = (output.get("iterations") or 0) - (output.get("warmup") or 0)
-            if iterations > 0:
+        if cell.workload in (matrix.LATENCY, matrix.CHURN, matrix.UDP):
+            # `iterations` is already the number the generator recorded; the warmup
+            # iterations are never counted in it. Subtracting them again dropped
+            # the numerator, and dividing by a window that includes the warmup
+            # dropped it again -- together, a 5% low reading on every setup row.
+            # The generator reports the measured window separately for this.
+            measured_ms = output.get("measured_ms")
+            iterations = output.get("iterations") or 0
+            if iterations > 0 and measured_ms:
+                cell.ops_per_s = round(iterations / (measured_ms / 1000.0), 1)
+            elif iterations > 0 and wall_ms:
                 cell.ops_per_s = round(iterations / (wall_ms / 1000.0), 1)
         connect = output.get("connect_us")
         if isinstance(connect, dict):
@@ -756,7 +814,7 @@ class Runner:
         if window.rss_hwm_kb:
             cell.rss_peak_reported_mb = window.rss_hwm_kb / 1024.0
         cell.threads_peak = window.threads_peak
-        cell.harness_ceiling_mbps = self.harness_ceiling
+        cell.harness_ceiling_mbps = self._ceilings.get(cell.streams)
 
     # -- the loop ------------------------------------------------------------
 
@@ -777,9 +835,7 @@ class Runner:
         return rotated
 
     def run_matrix(self, scenarios: list[matrix.Scenario]) -> None:
-        core_ids = [c for c in self.binaries]
-        # The first core in the list is the comparison baseline, so it is named
-        # explicitly rather than being whatever happened to sort first.
+        core_ids = list(self.binaries)
         links = matrix.links_in(scenarios)
         log(f"{len(scenarios)} scenarios, {len(links)} links, {len(core_ids)} cores, {self.runs} repeats")
 
@@ -866,7 +922,6 @@ class Runner:
         produced.source = (
             f"{config.source or config.path} -> generated by `zray preset iran`"
         )
-        produced.raw = produced.raw
         return produced
 
     def run_user_config(self, config: userconfig.UserConfig, core_id: str) -> Cell:

@@ -1202,6 +1202,11 @@ fn cmd_latency(proxy: Proxy, target: SocketAddr) -> J {
     let mut phases: BTreeMap<&str, Samples> = BTreeMap::new();
     let mut errors: Vec<String> = Vec::new();
     let started = Instant::now();
+    // `wall_ms` covers the warmup too, and an operations rate that divides a
+    // measured count by a window that includes unmeasured iterations is biased
+    // low by exactly the warmup's share. So the clock for the measured phase is
+    // started at the first recorded iteration, not at the loop.
+    let mut measured_at: Option<Instant> = None;
 
     for i in 0..(iterations + warmup) {
         let (mut sock, t) = match proxy.connect(target) {
@@ -1228,6 +1233,7 @@ fn cmd_latency(proxy: Proxy, target: SocketAddr) -> J {
         match outcome {
             Ok(()) => {
                 if i >= warmup {
+                    let _ = measured_at.get_or_insert_with(Instant::now);
                     rtt.push(t0.elapsed().as_secs_f64() * 1e6);
                     connect_total.push(t.total.as_secs_f64() * 1e6);
                     phases
@@ -1265,6 +1271,14 @@ fn cmd_latency(proxy: Proxy, target: SocketAddr) -> J {
         ("warmup".into(), J::U(warmup)),
         ("payload_bytes".into(), J::U(payload as u64)),
         ("wall_ms".into(), J::N(started.elapsed().as_secs_f64() * 1e3)),
+        (
+            "measured_ms".into(),
+            J::N(
+                measured_at
+                    .map(|t| t.elapsed().as_secs_f64() * 1e3)
+                    .unwrap_or_else(|| started.elapsed().as_secs_f64() * 1e3),
+            ),
+        ),
         ("latency_us".into(), samples_json(&rtt, "microseconds")),
         (
             "connect_us".into(),
@@ -1343,6 +1357,7 @@ fn cmd_udp(proxy: Proxy, target: SocketAddr) -> J {
     let mut received = 0u64;
     let mut buf = vec![0u8; 128 * 1024];
     let started = Instant::now();
+    let mut measured_at: Option<Instant> = None;
 
     for i in 0..(iterations + warmup) {
         let t0 = Instant::now();
@@ -1365,6 +1380,7 @@ fn cmd_udp(proxy: Proxy, target: SocketAddr) -> J {
                 }
                 received += usable as u64;
                 if i >= warmup {
+                    let _ = measured_at.get_or_insert_with(Instant::now);
                     rtt.push(t0.elapsed().as_secs_f64() * 1e6);
                 }
             }
@@ -1393,6 +1409,10 @@ fn cmd_udp(proxy: Proxy, target: SocketAddr) -> J {
         ("datagrams_sent".into(), J::U(sent)),
         ("bytes_received".into(), J::U(received)),
         ("wall_ms".into(), J::N(wall.as_secs_f64() * 1e3)),
+        (
+            "measured_ms".into(),
+            J::N(measured_at.map(|t| t.elapsed().as_secs_f64() * 1e3).unwrap_or(wall.as_secs_f64() * 1e3)),
+        ),
         ("latency_us".into(), samples_json(&rtt, "microseconds")),
         (
             "throughput_mbps".into(),

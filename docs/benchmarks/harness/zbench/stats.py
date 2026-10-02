@@ -155,10 +155,22 @@ def paired_ratio(
             "unproven",
             f"only {len(pairs)} usable pair(s); a ratio needs at least 2",
         )
-    ratios = [c / r if r else None for c, r in pairs]
-    ratios = [x for x in ratios if x is not None]
-    if not ratios:
-        return Comparison(None, None, None, len(pairs), "unproven", "a reference sample was zero")
+    # A zero reference sample has no ratio, so it cannot enter the bootstrap. It
+    # has to leave the reported pair count too: counting a pair the statistics
+    # never saw is how a single ratio ends up described as a three-pair result.
+    ratios = [c / r for c, r in pairs if r]
+    usable = len(ratios)
+    if usable < 2:
+        return Comparison(
+            None,
+            None,
+            None,
+            usable,
+            "unproven",
+            f"only {usable} usable pair(s) after dropping "
+            f"{len(pairs) - usable} with a zero reference sample; a ratio needs "
+            f"at least 2",
+        )
 
     rng = random.Random(seed)
     draws = []
@@ -171,26 +183,38 @@ def paired_ratio(
     point = median(ratios)
 
     if lo is None or hi is None or point is None:
-        return Comparison(point, lo, hi, len(pairs), "unproven", "bootstrap produced no interval")
+        return Comparison(point, lo, hi, usable, "unproven", "bootstrap produced no interval")
 
+    # Direction is decided by the metric, never by the sign of the ratio. A ratio
+    # above 1.0 is more throughput on a throughput row and more memory on a memory
+    # row, so reading the ratio alone called a 20% memory increase
+    # "candidate_cheaper" and printed that it was "21% more cheaper".
     if lo > 1.0 + tolerance:
-        verdict = "candidate_faster" if higher_is_better else "candidate_cheaper"
+        candidate_higher, margin = True, lo - 1.0
     elif hi < 1.0 - tolerance:
-        verdict = "reference_faster" if higher_is_better else "reference_cheaper"
+        candidate_higher, margin = False, 1.0 - hi
     else:
-        verdict = "within_noise"
-
-    if verdict == "within_noise":
-        explanation = (
+        return Comparison(
+            point,
+            lo,
+            hi,
+            usable,
+            "within_noise",
             f"the 95% interval [{lo:.2f}, {hi:.2f}]x includes 1.0x, so this run "
-            f"cannot resolve a difference of {tolerance:.0%} or more"
+            f"cannot resolve a difference of {tolerance:.0%} or more",
         )
-    else:
-        direction = "faster" if higher_is_better else "cheaper"
-        better = hi if verdict.startswith("candidate") else lo
-        explanation = (
-            f"the whole 95% interval [{lo:.2f}, {hi:.2f}]x lies on one side of "
-            f"1.0x; the candidate is at least {abs(better - 1.0):.0%} "
-            f"{'more' if better > 1 else 'less'} {direction}"
-        )
-    return Comparison(point, lo, hi, len(pairs), verdict, explanation)
+
+    # The margin is read off the end of the interval nearest 1.0, because that is
+    # the end the whole interval guarantees. Quoting the far end promises more
+    # than the data supports.
+    verdict = "candidate_better" if candidate_higher == higher_is_better else "candidate_worse"
+    return Comparison(
+        point,
+        lo,
+        hi,
+        usable,
+        verdict,
+        f"the whole 95% interval [{lo:.2f}, {hi:.2f}]x lies on one side of "
+        f"1.0x; the candidate's value is at least {margin:.0%} "
+        f"{'higher' if candidate_higher else 'lower'} than the reference",
+    )
