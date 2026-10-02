@@ -303,12 +303,13 @@ jobs:
       - name: build Zray at the base
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/base"
           git worktree add --detach "$RUNNER_TEMP/base/src" "${{ steps.base.outputs.value }}"
           cargo build --release -p zray-cli \
             --manifest-path "$RUNNER_TEMP/base/src/Cargo.toml" \
             --target-dir "$RUNNER_TEMP/base/target"
-          install -m 0755 "$RUNNER_TEMP/base/target/release/zray" "$RUNNER_TEMP/bin/zray-base"
+          # `-D`, not `-m`: install does not create the destination directory, and
+          # a step that forgets to fails only after the whole build.
+          install -D -m 0755 "$RUNNER_TEMP/base/target/release/zray" "$RUNNER_TEMP/bin/zray-base"
           "$RUNNER_TEMP/bin/zray-base" version
 
       - name: build xray-rust from its pinned tag
@@ -324,7 +325,7 @@ jobs:
           # recorded next to the binary's digest in the report.
           RUSTUP_TOOLCHAIN=stable cargo build --locked --release -p xray-cli \
             --manifest-path "$RUNNER_TEMP/src/xray-rust/Cargo.toml"
-          install -m 0755 "$RUNNER_TEMP/src/xray-rust/target/release/xray-rust" "$RUNNER_TEMP/bin/xray-rust"
+          install -D -m 0755 "$RUNNER_TEMP/src/xray-rust/target/release/xray-rust" "$RUNNER_TEMP/bin/xray-rust"
 
       - name: assemble the command
         run: |
