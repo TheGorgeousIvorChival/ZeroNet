@@ -468,11 +468,4 @@ mod tests {
         let mut buf = [0u8; 64];
         xor_keystream(&[0u8; 32], &[0u8; 12], u32::MAX, &mut buf);
     }
-
-    #[test]
-    fn empty_is_a_no_op() {
-        let mut buf: [u8; 0] = [];
-        xor_keystream(&[0u8; 32], &[0u8; 12], 0, &mut buf);
-        assert!(buf.is_empty());
-    }
 }

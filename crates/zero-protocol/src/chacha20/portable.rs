@@ -1053,9 +1053,9 @@ pub(super) unsafe fn stream_xor_raw(
         let c = core::cmp::min(64, len - off);
         block(&k, &n, (start + (off / 64) as u64) as u32, &mut ks);
         let words = c / 4;
-        for i in 0..words {
+        for (i, k) in ks.iter().enumerate().take(words) {
             let b = off + i * 4;
-            let w = (inp.add(b) as *const u32).read_unaligned() ^ ks[i];
+            let w = (inp.add(b) as *const u32).read_unaligned() ^ k;
             (out.add(b) as *mut u32).write_unaligned(w);
         }
         for i in words * 4..c {
