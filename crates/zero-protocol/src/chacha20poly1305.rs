@@ -71,12 +71,12 @@ impl ChaCha20Poly1305 {
         mac(&mut poly, aad, buf);
         // A branch on the first differing byte would leak the tag. This walks
         // all sixteen regardless.
+        if tag.len() != TAG_LEN {
+            return Err(Error);
+        }
         let mut diff = 0u8;
-        for (b, t) in finish(poly)
-            .iter()
-            .zip(tag.iter().chain(core::iter::repeat(&0)))
-        {
-            diff |= b ^ t;
+        for (want, got) in finish(poly).iter().zip(tag) {
+            diff |= want ^ got;
         }
         if diff != 0 {
             return Err(Error);
@@ -99,8 +99,10 @@ impl ChaCha20Poly1305 {
 fn mac(poly: &mut Poly1305, aad: &[u8], ciphertext: &[u8]) {
     poly.update_padded(aad);
     poly.update_padded(ciphertext);
-    let lengths = (aad.len() as u64) | ((ciphertext.len() as u64) << 64);
-    poly.update_padded(&lengths.to_le_bytes());
+    let mut lengths = [0u8; 16];
+    lengths[..8].copy_from_slice(&(aad.len() as u64).to_le_bytes());
+    lengths[8..].copy_from_slice(&(ciphertext.len() as u64).to_le_bytes());
+    poly.update_padded(&lengths);
 }
 
 fn finish(poly: Poly1305) -> Tag {
