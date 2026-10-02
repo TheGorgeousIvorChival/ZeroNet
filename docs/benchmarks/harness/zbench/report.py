@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import caps, matrix, stats
@@ -68,7 +68,6 @@ SHORT_STATUS = {
 
 # Visible markers. A blank cell is indistinguishable from a cell nobody looked
 # at, so nothing in a table is ever blank.
-MEASURED = "measured"
 MARKERS = {
     STATUS_MEASURED: "measured",
     STATUS_ACCEPTED: "config accepted, nothing measured",
@@ -393,6 +392,49 @@ def render_markdown(result: Result, agg: dict, cover: dict) -> str:
     )
     add("")
 
+    # -- the change's own question, before anything else --------------------
+    pairs: list[dict] = []
+    if result.base_revision:
+        pairs = candidate_pairs(agg)
+        add("## This change, against the commit it is based on")
+        add("")
+        add(f"- candidate: `{result.candidate_revision or 'working tree'}`")
+        add(f"- base: `{result.base_ref}` at `{result.base_revision}`")
+        add(
+            "- the two binaries are the same core, the same `--release` profile and "
+            "the same toolchain, built into separate target directories"
+        )
+        add("")
+        if not pairs:
+            add(
+                "No scenario produced a candidate/base pair. Either the base build "
+                "failed, or none of the suite's scenarios moved."
+            )
+            add("")
+        else:
+            add(
+                "| Scenario | Metric | Base | Candidate | Ratio | 95% interval | "
+                "Base's own spread |"
+            )
+            add("|---|---|---|---|---|---|---|")
+            for row in pairs:
+                low, high = row["ci95"]
+                spread = row.get("spread")
+                add(
+                    f"| `{row['scenario']}` | {row['metric']} | "
+                    f"{_fmt(row['base'], row['unit'])} | "
+                    f"{_fmt(row['candidate'], row['unit'])} | "
+                    f"{row['ratio']:.2f}x | {low:.2f}-{high:.2f}x | "
+                    f"{f'{spread:.1%}' if spread is not None else '-'} |"
+                )
+            add("")
+            add(
+                "\"Base's own spread\" is the base core's max over min across its own "
+                "repeats. A ratio smaller than that is inside the run's noise, and the "
+                "interval column is what settles it."
+            )
+            add("")
+
     # -- capability gaps, before any performance number ---------------------
     add("## Implemented surface, per project")
     add("")
@@ -712,6 +754,129 @@ def cover_label(agg: dict, core_id: str) -> str:
 
 def _escape(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
+
+
+def candidate_pairs(agg: dict, candidate: str = "zray") -> list[dict]:
+    """The candidate against its own base, one entry per scenario.
+
+    This is the only comparison whose ratio means "this change". Everything else
+    in the report is context, and keeping the two apart is what stops a five-line
+    diff from being read as a verdict about a whole project.
+    """
+    rows: list[dict] = []
+    for scenario, entry in agg["rows"].items():
+        record = entry["cores"].get(candidate)
+        base_record = entry["cores"].get(caps.BASE_ID)
+        if not record or record.get("status") != STATUS_MEASURED:
+            continue
+        if not base_record or base_record.get("status") != STATUS_MEASURED:
+            continue
+        versus = record.get("versus_baseline")
+        if not versus or versus.get("ratio") is None:
+            continue
+        rows.append(
+            {
+                "scenario": scenario,
+                "group": entry["group"],
+                "metric": entry["metric"],
+                "unit": entry["unit"],
+                "higher_is_better": entry["higher_is_better"],
+                "candidate": (record.get(entry["metric"]) or {}).get("median"),
+                "base": (base_record.get(entry["metric"]) or {}).get("median"),
+                "ratio": versus.get("ratio"),
+                "ci95": (versus.get("ci95_low"), versus.get("ci95_high")),
+                "verdict": versus.get("verdict"),
+                "pairs": versus.get("pairs"),
+                "spread": (entry.get("baseline_self_spread") or {}).get(
+                    "relative_spread"
+                ),
+            }
+        )
+    return rows
+
+
+@dataclass
+class Gate:
+    ok: bool
+    verdict: str
+    lines: list[str]
+
+
+def gate(
+    pairs: list[dict],
+    *,
+    max_regression: float | None = None,
+    min_improvement: float | None = None,
+) -> Gate:
+    """Decide whether a candidate is allowed to land, from the paired intervals.
+
+    A scenario fails when its whole interval lies on the wrong side of the
+    tolerance. It is not enough for the point estimate to be worse: with three
+    repeats a 4% regression and a 40% one look identical until the interval is
+    read, and a gate that cannot tell them apart is a gate that fails at random.
+
+    Direction is read from the metric, never from the sign of the ratio. A ratio
+    above 1.0 is an improvement for a throughput row and a regression for a memory
+    row, and a gate that assumes otherwise passes a memory regression with a
+    straight face.
+    """
+    if not pairs:
+        return Gate(
+            False,
+            "no comparison",
+            ["no scenario produced a candidate/base pair, so nothing could be gated"],
+        )
+
+    failures: list[str] = []
+    improved: list[dict] = []
+    regressed: list[dict] = []
+    unresolved: list[dict] = []
+
+    for row in pairs:
+        low, high = row["ci95"]
+        if row["verdict"] == "within_noise" or low is None or high is None:
+            unresolved.append(row)
+            continue
+        higher = row["higher_is_better"]
+        # rising == higher-is-better means the candidate is worse.
+        if (row["ratio"] >= 1.0) == higher:
+            regressed.append(row)
+        else:
+            improved.append(row)
+        if max_regression is not None:
+            beyond = high < 1.0 - max_regression if higher else low > 1.0 + max_regression
+            if beyond:
+                margin = (1.0 - high) if higher else (low - 1.0)
+                failures.append(
+                    f"`{row['scenario']}` {row['metric']} worse by at least "
+                    f"{margin * 100:.0f}% ({row['ratio']:.2f}x, 95% "
+                    f"{low:.2f}-{high:.2f}x, tolerance {max_regression:.0%})"
+                )
+
+    parts = [
+        f"- {len(improved)} scenario(s) resolved better",
+        f"- {len(regressed)} scenario(s) resolved worse",
+        f"- {len(unresolved)} scenario(s) unresolved: the interval spans 1.00x",
+    ]
+    if min_improvement is not None:
+        cleared = [
+            r for r in improved
+            if (r["ci95"][0] or 0) > 1.0 + min_improvement
+        ] or [
+            r for r in improved
+            if (r["ci95"][1] or 0) > 1.0 + min_improvement
+        ]
+        parts.append(
+            f"- {len(cleared)} scenario(s) cleared an improvement of "
+            f"{min_improvement:.0%}"
+        )
+    if failures:
+        return Gate(
+            False,
+            f"worse than the base by more than the tolerance on {len(failures)} scenario(s)",
+            parts + [""] + [f"  FAIL {line}" for line in failures],
+        )
+    return Gate(True, "within the requested tolerance", parts)
 
 
 def confounders(result: Result, agg: dict) -> list[str]:

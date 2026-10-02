@@ -29,24 +29,59 @@ cells and fails if any of them disagrees. It runs in CI on every run.
 
 ## Running it in CI
 
-`.github/workflows/benchmark.yml` has three jobs.
+`.github/workflows/benchmark.yml` has four jobs.
 
 **`capability`** runs on every pull request that touches `crates/` or this
 directory. It starts no long-lived process and moves no bulk data: every core's
 own config validator is handed each generated configuration and its answer is
 recorded. This is the job that shows, in review, that a connection type has
-stopped being accepted by one of the four cores. It also checks that
-`protocol-support.md` matches the capability data in the code, so the published
-table cannot drift.
+stopped being accepted by one of the four cores. It also runs the harness's own
+nineteen checks and verifies that `protocol-support.md` matches the capability
+data in the code, so the published table cannot drift.
 
-**`measure`** runs the suite. On a pull request or a push to `main` that is
-`standard`; on a schedule it is `full`; on `workflow_dispatch` it is whatever
-you ask for. It records the runner's hardware and its load average, uploads the
-whole result directory as an artefact, and appends the report to the job
-summary.
+**`pr`** runs on every pull request and answers the question a reviewer is
+actually asking: *did this change move the number?* It builds Zray twice -- once
+at the head, once at the merge base with the branch, each into its own target
+directory -- and measures both under the identical configuration, alongside
+Xray-core, sing-box and xray-rust for context. The base is the baseline, so
+every ratio in the report is candidate/base.
 
-**`comment`** posts the report on the pull request, replacing the previous one.
-It is skipped for pull requests from forks, where the token cannot write.
+This is a different comparison from `measure`, and the difference is the point.
+Four projects differ in source, in toolchain chain and in everything a change
+did not touch, so a five-line diff to a buffer copy cannot move that ratio in
+either direction: a regression hides inside the gap between two projects and the
+job reports nothing. Two builds of the same project can move.
+
+`--gate-regression 5` turns the result into a gate. A scenario fails when its
+*whole* 95% interval lies more than 5% on the wrong side, and the direction comes
+from the metric rather than from the sign of the ratio, so a memory increase is
+read as a regression and not as an improvement. The output is `gate.md` in the
+artefact, the reason for every failure is in the job summary, and the exit status
+is non-zero.
+
+**`measure`** runs the suite. On a push to `main` that is `standard`; on a
+schedule it is `full`; on `workflow_dispatch` it is whatever you ask for. It
+records the runner's hardware and its load average, uploads the whole result
+directory as an artefact, and appends the report to the job summary.
+
+**`comment`** posts the report on the pull request, replacing the previous one,
+with the change's own table outside the collapsible part. It is skipped for pull
+requests from forks, where the token cannot write.
+
+### Comparing two commits by hand
+
+```sh
+# the current working tree against any ref, with a 5% gate
+python3 bench.py --base-ref v0.2.0 --gate-regression 5
+```
+
+`--base-ref` builds the base in a detached worktree with its own target
+directory. A shared target directory reuses same-package fingerprints when
+source timestamps precede a previous build, and then the "base" is silently the
+candidate -- the one failure mode here that produces a confident wrong number
+rather than an obvious one. The base's commit and the candidate's are both
+recorded in the report, and a base binary whose commit disagrees with the ref it
+was given is called out in the notes rather than quietly relabelled.
 
 ### Supplying your own configurations
 
@@ -129,10 +164,13 @@ of the run's noise can be read on the same row.
 --only SUBSTRING     run only scenarios whose id contains this (repeatable)
 --exclude SUBSTRING  skip scenarios whose id contains this (repeatable)
 --runs N             repeats per cell; three is the minimum worth reading
---bytes 512M         bytes per transfer sample
+--bytes 512M         bytes per transfer sample, per direction
 --iterations 1000    round trips per latency and setup sample
 --cores a,b,c        comma separated; the first is the baseline
 --server-core NAME   the core that serves the proxy side of every cell
+--base-ref REF       build Zray from REF as the `zray-base` baseline
+--gate-regression N  fail when the candidate is worse than the base by more than N%
+--gate-improvement N report the scenarios that clear an improvement of N%
 --probe-only         ask each core whether it accepts the config; no traffic
 ```
 
@@ -199,6 +237,33 @@ binary, plus the argv that runs a config and the argv that validates one. A core
 that cannot be built is recorded as unavailable with the reason and the run
 continues with the rest; a run with fewer than two cores fails unless
 `--allow-single-core` is given.
+
+`zray-base` is the one core that is not a separate project, and it is the model
+for a candidate-versus-baseline comparison: the same `Core` shape, a `resolve_*`
+that builds from a ref in an isolated worktree, and a `source_revision` that
+travels into the report.
+
+## The harness's own checks
+
+`python3 test_harness.py` runs nineteen checks and needs no proxy core. Four of
+them exist because a defect in this harness produces a confident wrong number
+rather than a visible failure, and the last four found:
+
+- a duplex run reported `bytes_sent: 0` after writing 128 MB, because the writer
+  thread had its own byte counters
+- a per-flow size that was not a multiple of eight failed validation with a
+  "payload mismatch" that was not one, so `--bytes 100M --streams 3` reported
+  corruption on a healthy transfer
+- integer division dropped the remainder, so 100,000,000 bytes over three flows
+  moved 99,999,999 -- and the same truncation understated the ceiling every other
+  row is compared against
+- the duplex path half-closed after its reader had already returned, which
+  discarded the sink's completion byte through any relay that tears a connection
+  down on EOF
+
+The load generator's own arithmetic is checked through a real SOCKS hop against a
+real sink, and a peer that returns zeros is checked to be rejected, so the tail
+fix cannot have turned validation into a rubber stamp.
 
 ## Layout
 

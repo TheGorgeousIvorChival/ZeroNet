@@ -103,6 +103,9 @@ class Result:
     invocation: list[str] = field(default_factory=list)
     binaries: list[dict] = field(default_factory=list)
     server_core: str = ""
+    base_ref: str = ""
+    base_revision: str = ""
+    candidate_revision: str = ""
     probe_only: bool = False
     """True when the run asked each core whether it accepts a config and stopped
     there. A probe run produces no performance numbers, and every consumer has
@@ -174,6 +177,8 @@ class Runner:
         sink_port: int,
         probe_only: bool = False,
         unavailable: list | None = None,
+        base_ref: str = "",
+        candidate_revision: str = "",
     ):
         self.root = root
         self.workdir = workdir
@@ -196,6 +201,8 @@ class Runner:
             invocation=list(sys_argv()),
             binaries=[b.summary() for b in binaries.values()],
             server_core=server_core,
+            base_ref=base_ref,
+            candidate_revision=candidate_revision,
             probe_only=probe_only,
             identity=self.identity.summary(),
             harness_ceiling_mbps=harness_ceiling,
@@ -208,6 +215,27 @@ class Runner:
             self.result.notes.append(
                 f"{entry['core']} was not measured: {entry['reason']}"
             )
+        base = self.binaries.get(caps.BASE_ID)
+        if base is not None:
+            self.result.base_ref = base.source_ref or base_ref
+            self.result.base_revision = base.source_revision
+            if base_ref:
+                # A caller-supplied base binary carries no revision, so the ref is
+                # resolved separately. When the harness built the binary itself
+                # the two have to agree: a base binary from one commit wearing
+                # another's name is the worst combination available here, because
+                # the ratio is real and the caption is wrong.
+                resolved = cores.git(root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
+                if not self.result.base_revision:
+                    self.result.base_revision = resolved
+                elif resolved and resolved != self.result.base_revision:
+                    self.result.notes.append(
+                        f"the base binary reports commit {self.result.base_revision} "
+                        f"but {base_ref} resolves to {resolved}; the comparison is "
+                        f"against the binary, and the ref is recorded as given"
+                    )
+        if candidate_revision:
+            self.result.candidate_revision = candidate_revision
         if not self.identity.mldsa_seed:
             self.result.notes.append(
                 "OpenSSL 3.5 or newer was not available, so the ML-DSA-65 REALITY "

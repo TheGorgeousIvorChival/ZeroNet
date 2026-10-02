@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -80,11 +81,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cores",
-        default=",".join(caps.DEFAULT_CORES),
+        default=None,
         help=(
-            "comma-separated cores to compare. The first is the baseline every "
-            f"other core is compared against (default: {','.join(caps.DEFAULT_CORES)})"
+            "comma-separated cores to compare. The first is the baseline every other "
+            "core is compared against. The default is the four projects, or those "
+            f"plus {caps.BASE_ID} first when --base-ref is given"
         ),
+    )
+    parser.add_argument(
+        "--base-ref",
+        default=os.environ.get("BENCH_BASE_REF") or None,
+        help=(
+            "build Zray from this git ref as a second core and make it the baseline. "
+            "This is the comparison a change needs: the same core, the same profile "
+            "and the same toolchain, from the commit the change is measured against"
+        ),
+    )
+    parser.add_argument(
+        "--gate-regression",
+        type=float,
+        default=None,
+        metavar="PCT",
+        help=(
+            "exit non-zero when the candidate is worse than the base by more than "
+            "PCT on any scenario whose interval excludes the tolerance, e.g. 5 for 5%%"
+        ),
+    )
+    parser.add_argument(
+        "--gate-improvement",
+        type=float,
+        default=None,
+        metavar="PCT",
+        help="report the scenarios that clear this improvement; not a failure condition",
     )
     parser.add_argument(
         "--server-core",
@@ -238,7 +266,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.emit_support_doc:
         return _support_doc(args)
 
-    core_ids = [c.strip() for c in args.cores.split(",") if c.strip()]
+    if args.cores:
+        core_ids = [c.strip() for c in args.cores.split(",") if c.strip()]
+    elif args.base_ref:
+        # A change's own run wants its base first, so the ratios it prints are
+        # against the base rather than against whichever project sorted first.
+        core_ids = list(caps.PR_CORES)
+    else:
+        core_ids = list(caps.DEFAULT_CORES)
+    if args.base_ref and caps.BASE_ID not in core_ids:
+        core_ids.insert(0, caps.BASE_ID)
     unknown = [c for c in core_ids if c not in caps.ALL_CORES]
     if unknown:
         raise SystemExit(
@@ -274,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_build=not args.no_build,
         allow_download=not args.no_download,
         toolchain=args.xray_rust_toolchain,
+        base_ref=args.base_ref,
     )
     for entry in missing:
         runner.log(f"  {entry.core_id} is unavailable: {entry.reason}")
@@ -290,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_build=not args.no_build,
             allow_download=not args.no_download,
             toolchain=args.xray_rust_toolchain,
+            base_ref=args.base_ref,
         )
         binaries.update(extra)
         missing.extend(extra_missing)
@@ -321,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
         sink_port=sink_port,
         probe_only=args.probe_only,
         unavailable=unavailable,
+        base_ref=args.base_ref or "",
+        candidate_revision=_revision(ROOT),
     )
     engine.start_sink()
 
@@ -373,6 +414,24 @@ def main(argv: list[str] | None = None) -> int:
         engine.finish()
 
     written = report.write(engine.result, outdir, argv=sys.argv[1:])
+    gate_result = None
+    if args.gate_regression is not None or args.gate_improvement is not None:
+        gate_result = report.gate(
+            report.candidate_pairs(written["aggregate"]),
+            max_regression=args.gate_regression,
+            min_improvement=args.gate_improvement,
+        )
+        (outdir / "gate.md").write_text(
+            "# Regression gate\n\n**" + gate_result.verdict + "**\n\n"
+            + "\n".join(gate_result.lines)
+            + "\n"
+        )
+        runner.log(f"gate: {gate_result.verdict}")
+        for line in gate_result.lines:
+            if line.startswith("  FAIL"):
+                runner.log(line)
+        if not gate_result.ok:
+            exit_code = exit_code or 1
     (outdir / "commands.sh").write_text(_replay_script(result_invocation, binaries))
     runner.log(
         f"wrote {written['report'].name}, {written['results'].name}, "
@@ -392,7 +451,32 @@ def main(argv: list[str] | None = None) -> int:
         runner.log(f"no cell was {wanted}")
         return 1
     runner.log(f"{produced} cell(s) {wanted} out of {len(engine.result.cells)}")
+    if gate_result is not None:
+        runner.log(f"gate: {gate_result.verdict} (gate.md)")
     return exit_code
+
+
+def _revision(root: Path) -> str:
+    """The commit under test, or `sha-dirty` when the tree is not that commit.
+
+    A number from a modified tree is not a number from the commit it is
+    attributed to, so the difference is recorded rather than dropped.
+    """
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
+            text=True, timeout=60,
+        )
+        revision = head.stdout.strip()
+        if head.returncode != 0 or not revision:
+            return ""
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+            cwd=root, capture_output=True, text=True, timeout=180,
+        )
+        return revision + ("-dirty" if dirty.stdout.strip() else "")
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def _support_doc(args) -> int:

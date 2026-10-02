@@ -54,6 +54,86 @@ def check(name: str):
     return wrap
 
 
+# A SOCKS5 listener that forwards to the sink, so the load generator is driven
+# through a real proxy hop rather than straight at the sink. It propagates a
+# half-close instead of tearing the pair down, because a relay that closes both
+# directions on the first EOF swallows the sink's completion byte and the client
+# sees a truncated transfer that never was one.
+FORWARDER = """
+import socket, sys, threading
+listen, target = int(sys.argv[1]), int(sys.argv[2])
+
+def pump(a, b):
+    try:
+        while True:
+            data = a.recv(1 << 20)
+            if not data:
+                break
+            b.sendall(data)
+    except OSError:
+        pass
+    finally:
+        for s, how in ((b, socket.SHUT_WR), (a, socket.SHUT_RDWR)):
+            try:
+                s.shutdown(how)
+            except OSError:
+                pass
+
+def handle(conn):
+    try:
+        conn.recv(3)
+        conn.sendall(bytes([5, 0]))            # NO AUTHENTICATION REQUIRED
+        head = conn.recv(4)
+        n = {1: 4, 4: 16}.get(head[3], 0)
+        if n:
+            conn.recv(n)
+        conn.recv(2)
+        conn.sendall(bytes([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]))
+        up = socket.create_connection(("127.0.0.1", target))
+        threading.Thread(target=pump, args=(conn, up), daemon=True).start()
+        pump(up, conn)
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", listen))
+server.listen(128)
+while True:
+    conn, _ = server.accept()
+    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+"""
+
+# A peer that accepts the header and then returns zeros: a transfer any
+# implementation without validation would score as a pass.
+LIAR = """
+import socket, sys
+port = int(sys.argv[1])
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", port))
+server.listen(8)
+while True:
+    conn, _ = server.accept()
+    try:
+        conn.recv(24)
+        conn.sendall(b"\\x00" * (8 << 20))
+    except OSError:
+        pass
+    finally:
+        conn.close()
+"""
+
+
+def _loadgen_binary():
+    binary = HERE / "loadgen" / "target" / "release" / "loadgen"
+    if not binary.exists():
+        print("  (loadgen is not built; its checks need it)", file=sys.stderr)
+    return binary if binary.exists() else None
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -234,7 +314,9 @@ def _spelling() -> None:
         psk = identity.ss_passwords["shadowsocks2022"]
         assert "=" in psk, psk
         assert len(_base64.b64decode(psk, validate=True)) == 16, psk
-        assert "+" not in psk and "/" not in psk, "this fixture happened to avoid the alphabet"
+        assert set(psk) <= set(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+        ), psk
 
 
 @check("a scenario transport maps onto Xray's network spelling")
@@ -297,41 +379,149 @@ def _stats() -> None:
     assert a.as_dict() == b.as_dict()
 
 
-@check("the pattern validates and rejects corruption")
-def _pattern() -> None:
-    # Exercised through the load generator's own binary, because the pattern
-    # lives there; the check is that the sink and the generator agree.
-    binary = HERE / "loadgen" / "target" / "release" / "loadgen"
-    if not binary.exists():
-        print("  (loadgen is not built; the pattern check needs it)", file=sys.stderr)
+@check("the load generator moves exactly what it was asked to move")
+def _loadgen_arithmetic() -> None:
+    """Four arithmetic defects lived here, and none of them raised an error.
+
+    * A duplex run gave the writer thread its own byte counters, so it reported
+      `bytes_sent: 0` after writing a hundred megabytes, and a rate half of the
+      truth.
+    * A per-flow size that was not a multiple of eight failed validation with a
+      "payload mismatch" that was not one, so `--bytes 100M --streams 3` reported
+      corruption on a healthy transfer.
+    * Integer division dropped the remainder, so 100,000,000 bytes over three
+      flows moved 99,999,999 -- and the same truncation understated the ceiling
+      every other row is compared against.
+    * A zero-byte request encodes as the hold shape, so taking it as a transfer
+      reported a rate of zero as if it were a result.
+    """
+    binary = _loadgen_binary()
+    if binary is None:
         return
+    import socket
     import subprocess
+    import time
 
-    with tempfile.TemporaryDirectory() as raw:
-        port = 34567
-        sink = subprocess.Popen(
-            [str(binary), "sink", "--port", str(port)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+    def free_port() -> int:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def run(argv):
+        return subprocess.run(
+            [str(binary), *argv], capture_output=True, text=True, timeout=300
         )
-        try:
-            import time
 
-            time.sleep(0.6)
-            out = subprocess.run(
+    proxy_port, sink_port = free_port(), free_port()
+    sink = subprocess.Popen(
+        [str(binary), "sink", "--port", str(sink_port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    forwarder = subprocess.Popen(
+        [sys.executable, "-c", FORWARDER, str(proxy_port), str(sink_port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        time.sleep(1.0)
+        for mode in ("down", "up", "duplex"):
+            for request, streams in (("100M", 3), ("1G", 7), ("999", 5), ("7", 7)):
+                out = run(
+                    [
+                        "run", "--proxy", f"127.0.0.1:{proxy_port}",
+                        "--target", f"127.0.0.1:{sink_port}",
+                        "--mode", mode, "--bytes", request,
+                        "--streams", str(streams), "--json",
+                    ]
+                )
+                assert out.returncode == 0, f"{mode} {request}/{streams}: {out.stderr[-300:]}"
+                payload = json.loads(out.stdout)
+                assert not payload.get("errors"), (
+                    f"{mode} {request}/{streams}: {payload['errors'][:1]}"
+                )
+                wanted = payload["bytes_requested_per_direction"]
+                # `--bytes` is per direction, so a duplex run moves it twice and
+                # `bytes_moved` is the total across both.
+                assert payload["directions"] == (2 if mode == "duplex" else 1), payload
+                if mode == "duplex":
+                    assert payload["bytes_sent"] == wanted, (
+                        f"duplex reported bytes_sent={payload['bytes_sent']:,} of {wanted:,}"
+                    )
+                    assert payload["bytes_received"] == wanted, payload
+                    assert payload["bytes_moved"] == 2 * wanted, payload
+                else:
+                    assert payload["bytes_moved"] == wanted, (
+                        f"{mode} {request}/{streams}: moved "
+                        f"{payload['bytes_moved']:,} of {wanted:,}"
+                    )
+                    unused = "sent" if mode == "down" else "received"
+                    assert payload[f"bytes_{unused}"] == 0, (
+                        f"{mode} reported bytes on the wrong side: {payload}"
+                    )
+        out = run(
+            [
+                "run", "--proxy", f"127.0.0.1:{proxy_port}",
+                "--target", f"127.0.0.1:{sink_port}",
+                "--mode", "down", "--bytes", "0", "--json",
+            ]
+        )
+        assert out.returncode == 1, "a zero-byte download was accepted"
+        assert "bytes" in (json.loads(out.stdout).get("error") or ""), out.stdout
+
+        # The ceiling is the number every other row is compared against, so a
+        # dropped remainder in it makes every core look closer to the limit.
+        for request, streams in (("100M", 3), ("1G", 7), ("999", 5)):
+            out = run(
                 [
-                    str(binary), "selftest", "--target", f"127.0.0.1:{port}",
-                    "--bytes", "8M", "--streams", "4", "--json",
-                ],
-                capture_output=True, text=True, timeout=120,
+                    "selftest", "--target", f"127.0.0.1:{sink_port}",
+                    "--bytes", request, "--streams", str(streams), "--json",
+                ]
             )
-            assert out.returncode == 0, out.stdout + out.stderr
+            assert out.returncode == 0, out.stderr[-300:]
             payload = json.loads(out.stdout)
-            assert payload["bytes_moved"] == 8_000_000, payload
+            assert payload["bytes_moved"] == bench.byte_size(request), (
+                f"selftest {request}/{streams} moved {payload['bytes_moved']:,}"
+            )
             assert payload["throughput_mbps"] > 0, payload
-        finally:
-            sink.terminate()
-            sink.wait(timeout=10)
+    finally:
+        forwarder.terminate()
+        sink.terminate()
+        forwarder.wait(timeout=10)
+        sink.wait(timeout=10)
+
+
+@check("validation still rejects a peer that returns the wrong bytes")
+def _loadgen_rejects_corruption() -> None:
+    """The tail fix must not have turned validation into a rubber stamp."""
+    binary = _loadgen_binary()
+    if binary is None:
+        return
+    import socket
+    import subprocess
+    import time
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    liar = subprocess.Popen(
+        [sys.executable, "-c", LIAR, str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        time.sleep(1.0)
+        out = subprocess.run(
+            [
+                str(binary), "selftest", "--target", f"127.0.0.1:{port}",
+                "--bytes", "1M", "--streams", "1", "--json",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        combined = out.stdout + out.stderr
+        assert "mismatch" in combined or out.returncode != 0, (
+            "a peer returning zeros was accepted as a valid transfer"
+        )
+    finally:
+        liar.terminate()
+        liar.wait(timeout=10)
 
 
 @check("the sampler reads a real process")
@@ -416,6 +606,68 @@ def _support_doc() -> None:
             f"{core_id}: the pinned version appears more than once in the document"
         )
     assert "## Regenerating" in first
+
+
+@check("the regression gate reads the interval and the metric's direction")
+def _gate() -> None:
+    from zbench import report
+
+    def row(ratio, low, high, higher=True, scenario="s"):
+        return {
+            "scenario": scenario, "group": "baseline", "metric": "throughput_mbps",
+            "unit": "Mbit/s", "higher_is_better": higher, "candidate": 1.0,
+            "base": 1.0, "ratio": ratio, "ci95": (low, high),
+            "verdict": (
+                "within_noise" if low <= 1.0 <= high
+                else "candidate_faster" if low > 1.0 else "candidate_cheaper"
+            ),
+            "pairs": 3, "spread": 0.03,
+        }
+
+    # A 4% regression and a 40% one have the same shape in a point estimate. The
+    # interval is what tells them apart, and a gate that only reads the point
+    # estimate fails at random.
+    assert report.gate([row(0.96, 0.94, 0.98)], max_regression=0.10).ok
+    assert not report.gate([row(0.60, 0.55, 0.65)], max_regression=0.10).ok
+
+    # An unresolved interval is neither a pass nor a finding: it is the absence of
+    # a measurement, and it must not be reported as one.
+    noisy = report.gate([row(0.93, 0.85, 1.10)], max_regression=0.10)
+    assert noisy.ok, noisy.lines
+    assert any("unresolved" in line for line in noisy.lines)
+
+    # Direction is read from the metric, not the sign of the ratio: a ratio above
+    # 1.0 is an improvement for throughput and a regression for memory.
+    worse_memory = report.gate([row(1.30, 1.20, 1.40, higher=False)], max_regression=0.10)
+    assert not worse_memory.ok, worse_memory.lines
+    better_memory = report.gate([row(0.90, 0.85, 0.95, higher=False)], max_regression=0.10)
+    assert better_memory.ok, better_memory.lines
+
+    # One bad scenario among many is still a failure, and it is named.
+    mixed = report.gate(
+        [row(1.01, 0.99, 1.03, scenario="fine"),
+         row(0.70, 0.60, 0.80, scenario="broken")],
+        max_regression=0.10,
+    )
+    assert not mixed.ok, mixed.lines
+    assert any("`broken`" in line for line in mixed.lines), mixed.lines
+
+    assert not report.gate([], max_regression=0.1).ok, "an empty comparison passed"
+
+
+@check("the base core is a real core with a pin and a default slot")
+def _base_core() -> None:
+    assert caps.BASE_ID in caps.ALL_CORES
+    assert caps.BASE_ID in caps.PINS, "the base core has no pin"
+    assert caps.PR_CORES[0] == caps.BASE_ID, "the base has to be the baseline"
+    base = caps.get(caps.BASE_ID)
+    candidate = caps.get("zray")
+    assert base.dialect == candidate.dialect
+    assert base.client_protocols == candidate.client_protocols
+    assert base.transports == candidate.transports
+    assert base.server_protocols == candidate.server_protocols
+    # A base that cannot serve would make every scenario a server skip.
+    assert base.can_serve
 
 
 @check("the chart scale is monotonic and total")

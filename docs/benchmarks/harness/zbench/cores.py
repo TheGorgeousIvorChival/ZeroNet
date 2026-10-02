@@ -217,10 +217,17 @@ class CoreBinary:
     """`provided`, `built` or `downloaded`. Recorded so a reader knows whether
     the binary is the project's own artifact or something the caller supplied."""
     build_command: str = ""
+    source_revision: str = ""
+    """The commit the binary was built from, when the harness knows it. Empty for a
+    binary the caller supplied: a path and a digest identify an artifact, but
+    nothing inside a binary states which commit produced it."""
+    source_ref: str = ""
 
     def summary(self) -> dict:
         return {
             "id": self.core.id,
+            "source_revision": self.source_revision or None,
+            "source_ref": self.source_ref or None,
             "label": self.core.label,
             "language": self.core.language,
             "version": self.version,
@@ -413,6 +420,94 @@ def resolve_xray_rust(
     )
 
 
+def git(root: Path, *args: str, timeout: float = 300) -> str:
+    return run(["git", *args], cwd=root, timeout=timeout).stdout.strip()
+
+
+def resolve_zray_base(
+    root: Path,
+    ref: str | None,
+    bin_dir: Path,
+    timeout: float,
+    toolchain: str | None = None,
+    allow_build: bool = True,
+) -> CoreBinary:
+    """Build Zray from `ref` in its own worktree, and register it as a core.
+
+    Three things are pinned so the two binaries are comparable: the same
+    `--release` profile, the same toolchain, and a target directory of their own.
+    A shared target directory reuses same-package fingerprints when source
+    timestamps precede a previous build, and then the "base" is the candidate --
+    which is the one failure mode here that would produce a confident, wrong
+    number rather than an obvious one.
+    """
+    if not ref:
+        raise SystemExit(
+            f"{caps.BASE_ID} needs --base-ref: it is Zray built from a ref, and "
+            f"there is nothing to build without one"
+        )
+    if not allow_build:
+        raise SystemExit(
+            f"building {caps.BASE_ID} from {ref} needs builds allowed, or an "
+            f"explicit --bin-{caps.BASE_ID}"
+        )
+    revision = git(root, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    checkout = bin_dir / "zray-base-src"
+    target = bin_dir / "zray-base-target"
+
+    def discard() -> None:
+        run(["git", "worktree", "remove", "--force", str(checkout)],
+            cwd=root, timeout=timeout, check=False)
+        if checkout.is_dir():
+            shutil.rmtree(checkout, ignore_errors=True)
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+
+    discard()
+    run(
+        ["git", "worktree", "add", "--detach", str(checkout), revision],
+        cwd=root,
+        timeout=timeout,
+    )
+    env = dict(os.environ)
+    if toolchain:
+        env["RUSTUP_TOOLCHAIN"] = toolchain
+    try:
+        run(
+            ["cargo", "build", "--release", "-p", "zray-cli", "--target-dir", str(target)],
+            cwd=checkout,
+            env=env,
+            timeout=timeout,
+        )
+        built = target / "release" / (
+            "zray.exe" if platform.system() == "Windows" else "zray"
+        )
+        if not built.exists():
+            raise SystemExit(f"the base build produced no binary at {built}")
+        binary = bin_dir / caps.BASE_ID
+        shutil.copy2(built, binary)
+        binary.chmod(0o755)
+    finally:
+        # The worktree has to go even when the build failed: a stray worktree
+        # makes the next run's `git worktree add` fail, and the next run is the
+        # one somebody is waiting on.
+        discard()
+    return CoreBinary(
+        core=caps.ZRAY_BASE,
+        path=binary,
+        version=_probe_version(caps.ZRAY_BASE, binary),
+        digest=sha256(binary),
+        origin="built",
+        build_command=(
+            f"git worktree add --detach {revision} && cargo build --release "
+            f"-p zray-cli --target-dir <isolated>"
+            + (f"  (RUSTUP_TOOLCHAIN={toolchain})" if toolchain else "")
+        ),
+        source_revision=revision,
+        source_ref=ref,
+    )
+
+
 def _from_env(name: str) -> Path | None:
     value = os.environ.get(name)
     return Path(value) if value else None
@@ -437,6 +532,7 @@ def resolve_all(
     allow_download: bool = True,
     timeout: float = 3600,
     toolchain: str | None = None,
+    base_ref: str | None = None,
 ) -> tuple[dict[str, CoreBinary], list[Unavailable]]:
     """Resolve every requested core, and explain each one that cannot be had.
 
@@ -451,7 +547,11 @@ def resolve_all(
     for core_id in ids:
         given_path = given.get(core_id)
         try:
-            if core_id == "zray":
+            if core_id == caps.BASE_ID:
+                out[core_id] = resolve_zray_base(
+                    root, base_ref, bin_dir, timeout, toolchain, allow_build
+                )
+            elif core_id == "zray":
                 out[core_id] = resolve_zray(root, given_path, allow_build)
             elif core_id == "xray":
                 out[core_id] = resolve_xray(bin_dir, given_path, allow_download)

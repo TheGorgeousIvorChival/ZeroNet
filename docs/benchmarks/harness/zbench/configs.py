@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import secrets
 import subprocess
 from dataclasses import dataclass, field
@@ -919,10 +918,3 @@ def is_supported_shape(dialect: str, link: Link) -> bool:
             return False
         return link.quic_based or link.transport in ("raw", "ws", "httpupgrade", "grpc")
     return False
-
-
-def relative_to_cwd(path: Path) -> str:
-    try:
-        return os.path.relpath(path, Path.cwd())
-    except ValueError:
-        return str(path)

@@ -37,6 +37,11 @@ from dataclasses import dataclass, field
 # the version string and SHA-256 of whatever binary it actually used, so a
 # mismatch between the two shows up in the report instead of going unnoticed.
 
+#: The base core is Zray built from a ref rather than from the workspace, so it
+#: has no version of its own. The pin exists so that every core in `ALL_CORES`
+#: resolves, and its `note` is what says why.
+BASE_ID = "zray-base"
+
 PINS = {
     "xray": {
         "project": "Xray-core",
@@ -64,6 +69,13 @@ PINS = {
         "repo": "https://github.com/zeghostwriter/ZeroNet",
         "version": "0.1.0",
         "note": "built from the checkout under test",
+        "asset": None,
+    },
+    BASE_ID: {
+        "project": "Zray (base commit)",
+        "repo": "https://github.com/zeghostwriter/ZeroNet",
+        "version": "from --base-ref",
+        "note": "the same core built from the ref a change is measured against",
         "asset": None,
     },
 }
@@ -380,8 +392,45 @@ XRAY_RUST = Core(
     },
 )
 
-ALL_CORES = {c.id: c for c in (ZRAY, XRAY, SINGBOX, XRAY_RUST)}
+#: The same core built from a different commit. Present only when a run is asked
+#: to build one, because the question a pull request asks is "did this change move
+#: the number", and the only comparison that answers it is the same core from the
+#: commit the change is measured against. A five-line diff to a buffer copy cannot
+#: move a core-versus-core ratio in either direction, so a regression hides inside
+#: the difference between two projects.
+ZRAY_BASE = Core(
+    id=BASE_ID,
+    label="Zray (base commit)",
+    language="Rust",
+    dialect="xray",
+    client_protocols=ZRAY.client_protocols,
+    server_protocols=ZRAY.server_protocols,
+    transports=ZRAY.transports,
+    securities=ZRAY.securities,
+    vision=ZRAY.vision,
+    mux=ZRAY.mux,
+    udp=ZRAY.udp,
+    can_serve=True,
+    version_arg=ZRAY.version_arg,
+    notes={
+        "purpose": (
+            "The candidate's own baseline: the same core, the same profile and the "
+            "same toolchain, built from the ref passed as `--base-ref`."
+        ),
+        "build": (
+            "Built in a detached worktree with its own target directory. Sharing a "
+            "target between two checkouts reuses same-package fingerprints when "
+            "source timestamps precede a previous build, and then the \"base\" is "
+            "the candidate."
+        ),
+    },
+)
+
+ALL_CORES = {c.id: c for c in (ZRAY, XRAY, SINGBOX, XRAY_RUST, ZRAY_BASE)}
 DEFAULT_CORES = ["zray", "xray", "singbox", "xray-rust"]
+#: What a pull request run compares: its own build, then the four projects for
+#: context, with the base first so it is the baseline every ratio is against.
+PR_CORES = [BASE_ID, "zray", "xray", "singbox", "xray-rust"]
 
 
 def get(core_id: str) -> Core:

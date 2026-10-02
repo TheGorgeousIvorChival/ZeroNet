@@ -30,7 +30,7 @@ import platform
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 IS_LINUX = platform.system() == "Linux"
 PAGE_KB = os.sysconf("SC_PAGE_SIZE") // 1024 if hasattr(os, "sysconf") else 4
@@ -48,19 +48,6 @@ class Sample:
     rss_kb: float
     cpu_s: float
     threads: int | None
-
-
-@dataclass
-class Measurement:
-    rss_idle_kb: float | None = None
-    rss_peak_kb: float = 0.0
-    rss_peak_reported_kb: float | None = None
-    """`VmHWM` on Linux: the kernel's own high-water mark, unsampled."""
-    cpu_s: float = 0.0
-    threads_start: int | None = None
-    threads_peak: int | None = None
-    samples: int = 0
-    notes: list[str] = field(default_factory=list)
 
 
 def _read_linux(pid: int) -> tuple[float, float, int] | None:

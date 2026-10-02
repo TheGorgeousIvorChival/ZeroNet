@@ -194,15 +194,3 @@ def paired_ratio(
             f"{'more' if better > 1 else 'less'} {direction}"
         )
     return Comparison(point, lo, hi, len(pairs), verdict, explanation)
-
-
-def relative(percent: float | None) -> str:
-    if percent is None:
-        return "n/a"
-    return f"{percent:+.0f}%"
-
-
-def format_ratio(ratio: float | None) -> str:
-    if ratio is None:
-        return "n/a"
-    return f"{ratio:.2f}x"
