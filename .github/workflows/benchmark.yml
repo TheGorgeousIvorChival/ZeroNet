@@ -511,6 +511,11 @@ jobs:
           export BENCH_USER_TARGET="${{ inputs.user_target }}"
           export BENCH_BASE_REF="${{ inputs.base_ref }}"
           export BENCH_REPO="${{ inputs.repo }}"
+          # Only when a sentinel asks for it: `gh` authenticates from the
+          # environment in Actions, and this token is scoped to this repository.
+          if [[ "${{ inputs.base_ref }}" == @* ]]; then
+            export GH_TOKEN="${{ github.token }}"
+          fi
           export BENCH_GATE="${{ inputs.gate_regression }}"
           [[ -d "$RUNNER_TEMP/user-configs" ]] && export BENCH_USER_DIR="$RUNNER_TEMP/user-configs"
           bash .github/scripts/bench-args.sh | tee "$RUNNER_TEMP/command"

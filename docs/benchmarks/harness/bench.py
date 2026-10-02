@@ -102,6 +102,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--exclude-prs",
+        default="",
+        metavar="NUMBERS",
+        help=(
+            "pull request numbers to leave out of a @merged-prs baseline, comma "
+            "separated. Two open pull requests that edit the same file often do "
+            "not combine, and then there is no single merged state to measure"
+        ),
+    )
+    parser.add_argument(
         "--repo",
         default=DEFAULT_REPO,
         metavar="OWNER/NAME",
@@ -347,7 +357,12 @@ def main(argv: list[str] | None = None) -> int:
     base_notes: list[str] = []
     if args.base_ref and args.base_ref.startswith("@"):
         runner.log(f"resolving --base-ref {args.base_ref} against {args.repo}")
-        resolved, base_notes = prbase.resolve_base_ref(ROOT, args.base_ref, repo=args.repo)
+        excluded = {
+            int(n) for n in args.exclude_prs.replace(",", " ").split() if n.isdigit()
+        }
+        resolved, base_notes = prbase.resolve_base_ref(
+            ROOT, args.base_ref, repo=args.repo, exclude=excluded
+        )
         args.base_ref = resolved
         for note in base_notes:
             runner.log(f"  base: {note}")
