@@ -628,8 +628,23 @@ class Runner:
                 cell.diagnostic = proc.log_tail(400)
                 return cell
             if output.get("errors"):
-                cell.status = STATUS_ERROR
-                cell.reason = "; ".join(str(e) for e in output["errors"][:3])[:400]
+                errors = [str(e) for e in output["errors"]]
+                # A read that trips the socket deadline surfaces as EAGAIN, which
+                # on Linux is error 11 and reads like "resource temporarily
+                # unavailable" -- a resource problem, not what happened. The core
+                # stopped sending for longer than the transfer's own deadline, so
+                # that is a timeout, and saying so is what tells a reader the
+                # core stalled rather than ran out of memory or refused a
+                # connection.
+                stalled = all("temporarily unavailable" in e for e in errors)
+                cell.status = STATUS_TIMEOUT if stalled else STATUS_ERROR
+                cell.reason = (
+                    f"the core stopped sending for longer than the transfer's "
+                    f"deadline ({len(errors)} of "
+                    f"{len(errors)} flows); {errors[0][:300]}"
+                    if stalled
+                    else "; ".join(errors[:3])[:400]
+                )
                 cell.diagnostic = proc.log_tail(400)
                 return cell
 
@@ -909,8 +924,23 @@ class Runner:
                 cell.reason = "the load generator did not finish in time"
                 return cell
             if output.get("errors"):
-                cell.status = STATUS_ERROR
-                cell.reason = "; ".join(str(e) for e in output["errors"][:3])[:400]
+                errors = [str(e) for e in output["errors"]]
+                # A read that trips the socket deadline surfaces as EAGAIN, which
+                # on Linux is error 11 and reads like "resource temporarily
+                # unavailable" -- a resource problem, not what happened. The core
+                # stopped sending for longer than the transfer's own deadline, so
+                # that is a timeout, and saying so is what tells a reader the
+                # core stalled rather than ran out of memory or refused a
+                # connection.
+                stalled = all("temporarily unavailable" in e for e in errors)
+                cell.status = STATUS_TIMEOUT if stalled else STATUS_ERROR
+                cell.reason = (
+                    f"the core stopped sending for longer than the transfer's "
+                    f"deadline ({len(errors)} of "
+                    f"{len(errors)} flows); {errors[0][:300]}"
+                    if stalled
+                    else "; ".join(errors[:3])[:400]
+                )
                 cell.diagnostic = proc.log_tail(400)
                 return cell
             self._fill(cell, output, window)
